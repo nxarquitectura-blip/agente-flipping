@@ -1,0 +1,82 @@
+name: Reloj 8AM - Motor House Flipping
+
+on:
+  schedule:
+    # 07:45 Argentina (UTC-3, sin horario de verano) = 10:45 UTC.
+    # GitHub puede demorar algunos minutos los cron en horas pico.
+    - cron: "45 10 * * *"
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Modo de ejecución"
+        type: choice
+        default: completo
+        options: [completo, solo-tablero, dry-run]
+
+permissions:
+  contents: write   # para commitear index.html (GitHub Pages)
+
+concurrency:
+  group: motor-house-flipping
+  cancel-in-progress: false
+
+jobs:
+  correr-motor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TABLERO_URL: ${{ vars.TABLERO_URL }}
+      # Opcionales: actores dedicados de Apify por portal (si no, crawler + Gemini)
+      APIFY_ACTOR_ZONAPROP: ${{ vars.APIFY_ACTOR_ZONAPROP }}
+      APIFY_ACTOR_ARGENPROP: ${{ vars.APIFY_ACTOR_ARGENPROP }}
+      APIFY_ACTOR_MELI: ${{ vars.APIFY_ACTOR_MELI }}
+      APIFY_ACTOR_MUDAFY: ${{ vars.APIFY_ACTOR_MUDAFY }}
+      APIFY_ACTOR_MITULA: ${{ vars.APIFY_ACTOR_MITULA }}
+      APIFY_ACTOR_REMAX: ${{ vars.APIFY_ACTOR_REMAX }}
+      PYTHONUNBUFFERED: "1"
+      TZ: America/Argentina/Buenos_Aires
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr el motor
+        run: |
+          MODO="${{ github.event.inputs.modo || 'completo' }}"
+          case "$MODO" in
+            solo-tablero) python main.py --solo-tablero ;;
+            dry-run)      python main.py --dry-run ;;
+            *)            python main.py ;;
+          esac
+
+      - name: Publicar tablero (index.html)
+        if: always()
+        run: |
+          if [ -f index.html ]; then
+            git config user.name "motor-flipping-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add index.html
+            if git diff --cached --quiet; then
+              echo "Tablero sin cambios."
+            else
+              git commit -m "Tablero $(date +%Y-%m-%d)"
+              git pull --rebase
+              git push
+            fi
+          fi

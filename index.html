@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Tablero House Flipping</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#ffffff;--text:#16181d;--muted:#5f6673;--border:#e2e5ea;
+  --accent:#1f6feb;--ok:#1a7f37;--ok-bg:#e8f5ec;--bad:#c62828;--bad-bg:#fdecec;
+  --warn:#9a6700;--warn-bg:#fff6dd;--chip:#eef1f5;--shadow:0 1px 2px rgba(0,0,0,.06),0 4px 14px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1115;--panel:#171a21;--text:#e7e9ee;--muted:#9aa3b2;--border:#2a2f3a;
+    --accent:#4c8dff;--ok:#3fb950;--ok-bg:#12291a;--bad:#ff6b6b;--bad-bg:#2d1517;
+    --warn:#e3b341;--warn-bg:#2b230f;--chip:#222733;--shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1115;--panel:#171a21;--text:#e7e9ee;--muted:#9aa3b2;--border:#2a2f3a;
+  --accent:#4c8dff;--ok:#3fb950;--ok-bg:#12291a;--bad:#ff6b6b;--bad-bg:#2d1517;
+  --warn:#e3b341;--warn-bg:#2b230f;--chip:#222733;--shadow:none;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px}
+.top{max-width:1200px;margin:0 auto;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+h1{font-size:18px;margin:0}
+.meta{color:var(--muted);font-size:13px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--warn)}
+.dot.on{background:var(--ok)}.dot.off{background:var(--bad)}
+.controls{max-width:1200px;margin:12px auto 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.tab{border:1px solid var(--border);background:var(--panel);color:var(--text);padding:7px 12px;border-radius:999px;cursor:pointer;font-size:14px}
+.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+select,input[type=search]{border:1px solid var(--border);background:var(--panel);color:var(--text);padding:7px 10px;border-radius:8px;font-size:14px}
+input[type=search]{flex:1;min-width:160px}
+main{max-width:1200px;margin:16px auto;padding:0 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+.foto{height:150px;background:var(--chip) center/cover no-repeat}
+.body{padding:12px 14px;display:flex;flex-direction:column;gap:10px;flex:1}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
+.barrio{font-weight:700;font-size:16px}
+.precio{font-weight:700;font-size:17px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--chip);border-radius:6px;padding:2px 8px;font-size:12.5px;color:var(--muted)}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.bad{background:var(--bad-bg);color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{padding:5px 4px;border-bottom:1px solid var(--border);text-align:right}
+th:first-child,td:first-child{text-align:left}
+tr.base td{font-weight:700;background:var(--chip)}
+.pos{color:var(--ok)}.neg{color:var(--bad)}
+.oferta{border-radius:10px;padding:8px 10px;font-size:13.5px;background:var(--ok-bg);color:var(--ok)}
+.oferta.warn{background:var(--warn-bg);color:var(--warn)}
+details{font-size:13.5px}
+summary{cursor:pointer;color:var(--accent);font-weight:600}
+details ul{margin:6px 0 0;padding-left:18px}
+a{color:var(--accent)}
+.acciones{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--border)}
+.btn{flex:1;border:0;border-radius:10px;padding:10px;font-size:14.5px;font-weight:600;cursor:pointer}
+.btn.si{background:var(--ok);color:#fff}.btn.no{background:var(--bad-bg);color:var(--bad)}.btn.neutro{background:var(--chip);color:var(--text)}
+.btn:disabled{opacity:.5;cursor:wait}
+.vacio{grid-column:1/-1;text-align:center;color:var(--muted);padding:48px 0}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:calc(100% - 32px)}
+#toast.show{opacity:1}
+@media (max-width:420px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <div>
+      <h1>🏠 House Flipping · CABA + GBA Norte</h1>
+      <div class="meta"><span id="dot" class="dot"></span><span id="conexion">Conectando…</span> · Generado 17/11/2026 12:12</div>
+    </div>
+    <button class="tab" id="tema" title="Cambiar tema">🌓</button>
+  </div>
+  <div class="controls">
+    <button class="tab active" data-estado="nueva">🆕 Nuevas <span id="c-nueva"></span></button>
+    <button class="tab" data-estado="me_interesa">✅ Me interesa <span id="c-me_interesa"></span></button>
+    <button class="tab" data-estado="descartada">❌ Descartadas <span id="c-descartada"></span></button>
+    <select id="orden" aria-label="Ordenar">
+      <option value="roi">Mayor ROI (Media)</option>
+      <option value="rebaja">Menor rebaja requerida</option>
+      <option value="precio">Menor precio</option>
+      <option value="entorno">Mejor entorno</option>
+      <option value="reciente">Más recientes</option>
+    </select>
+    <input type="search" id="buscar" placeholder="Buscar barrio, dirección, portal…">
+  </div>
+</header>
+<main id="lista"></main>
+<div id="toast" role="status"></div>
+
+<script>
+const CONFIG = { url: "https://wgzmwnoshzjtuoinlkoq.supabase.co", key: "sb_publishable_SZ1mXB6gcYbT9zveccwgsg_nyMHWGjm", tabla: "propiedades" };
+const SNAPSHOT = [];
+let props = SNAPSHOT;
+let filtroEstado = "nueva";
+
+const fmtUSD = n => n == null ? "—" : "USD " + new Intl.NumberFormat("es-AR", {maximumFractionDigits: 0}).format(n);
+const fmtPct = n => n == null ? "—" : (n * 100).toFixed(1).replace(".", ",") + "%";
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const urlSegura = u => /^https?:\/\//i.test(u || "") ? esc(u) : "#";
+
+function headers(extra = {}) {
+  const h = { apikey: CONFIG.key, "Content-Type": "application/json", ...extra };
+  if (!CONFIG.key.startsWith("sb_")) h.Authorization = "Bearer " + CONFIG.key;
+  return h;
+}
+
+function estadoConexion(ok, texto) {
+  document.getElementById("dot").className = "dot " + (ok ? "on" : "off");
+  document.getElementById("conexion").textContent = texto;
+}
+
+async function cargar() {
+  try {
+    const r = await fetch(`${CONFIG.url}/rest/v1/${CONFIG.tabla}?select=*&aprobada=is.true&order=creado_en.desc&limit=500`, { headers: headers() });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    props = await r.json();
+    estadoConexion(true, "Sincronizado con Supabase");
+  } catch (e) {
+    estadoConexion(false, "Sin conexión: mostrando la copia del " + "17/11/2026 12:12");
+  }
+  render();
+}
+
+async function cambiarEstado(id, estado, boton) {
+  const p = props.find(x => x.id === id);
+  if (!p) return;
+  const previo = p.estado;
+  boton.closest(".acciones").querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    const r = await fetch(`${CONFIG.url}/rest/v1/${CONFIG.tabla}?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: headers({ Prefer: "return=representation" }),
+      body: JSON.stringify({ estado, actualizado_en: new Date().toISOString() })
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const filas = await r.json();
+    if (!filas.length) throw new Error("Supabase no permitió el cambio (revisá las políticas RLS).");
+    p.estado = estado;
+    toast(estado === "me_interesa" ? "✅ Marcada como 'Me interesa'" : estado === "descartada" ? "❌ Descartada" : "↩ Restaurada");
+  } catch (e) {
+    p.estado = previo;
+    toast("⚠️ No se pudo guardar: " + e.message);
+  }
+  render();
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2800);
+}
+
+function ordenar(lista) {
+  const modo = document.getElementById("orden").value;
+  const f = {
+    roi: (a, b) => (b.roi_media ?? -9) - (a.roi_media ?? -9),
+    rebaja: (a, b) => (a.rebaja_requerida_pct ?? 9) - (b.rebaja_requerida_pct ?? 9),
+    precio: (a, b) => a.precio_usd - b.precio_usd,
+    entorno: (a, b) => (b.puntaje_entorno ?? 0) - (a.puntaje_entorno ?? 0),
+    reciente: (a, b) => String(b.creado_en).localeCompare(String(a.creado_en)),
+  }[modo];
+  return lista.sort(f);
+}
+
+function tablaEscenarios(p) {
+  const orden = ["Mínima", "Media", "Integral"];
+  const esc_ = p.escenarios || {};
+  const filas = orden.filter(k => esc_[k]).map(k => {
+    const e = esc_[k];
+    return `<tr class="${k === "Media" ? "base" : ""}">
+      <td>${k}${k === "Media" ? " ★" : ""}</td>
+      <td>${fmtUSD(e.costo_reforma)}</td>
+      <td>${fmtUSD(e.inversion_total)}</td>
+      <td>${fmtUSD(e.precio_venta)}</td>
+      <td class="${e.ganancia_neta >= 0 ? "pos" : "neg"}">${fmtUSD(e.ganancia_neta)}</td>
+      <td class="${e.roi >= 0.15 ? "pos" : e.roi < 0 ? "neg" : ""}">${fmtPct(e.roi)}</td>
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>Reforma</th><th>Obra</th><th>Inversión</th><th>Venta</th><th>Ganancia</th><th>ROI</th></tr></thead><tbody>${filas}</tbody></table>`;
+}
+
+function bloqueEntorno(p) {
+  const e = p.entorno;
+  if (!e) return "";
+  const lista = (arr, f) => (arr || []).map(f).filter(Boolean);
+  const transporte = [
+    ...lista(e.subtes, s => `🚇 Subte ${esc(s.linea)} · ${esc(s.estacion)} (${esc(s.cuadras ?? "?")} cdas)`),
+    ...lista(e.trenes, s => `🚆 Tren ${esc(s.linea)} · ${esc(s.estacion)} (${esc(s.cuadras ?? "?")} cdas)`),
+    ...lista(e.metrobus, s => `🚌 Metrobús ${esc(s.corredor)} · ${esc(s.parada)} (${esc(s.cuadras ?? "?")} cdas)`),
+    ...lista(e.avenidas, s => `🛣️ ${esc(s.nombre)} (${esc(s.cuadras ?? "?")} cdas)`),
+  ];
+  const impacto = { positivo: "ok", neutro: "", negativo: "bad" }[e.impacto_reventa] ?? "";
+  return `<details>
+    <summary>📍 Entorno ${e.puntaje_entorno ?? "?"}/10 <span class="chip ${impacto}">${esc(e.impacto_reventa)}</span></summary>
+    <p>${esc(e.resumen)}</p>
+    ${transporte.length ? `<ul>${transporte.map(t => `<li>${t}</li>`).join("")}</ul>` : ""}
+    ${(e.puntos_fuertes || []).length ? `<p><b>A favor:</b> ${e.puntos_fuertes.map(esc).join(" · ")}</p>` : ""}
+    ${(e.riesgos || []).length ? `<p><b>Riesgos:</b> ${e.riesgos.map(esc).join(" · ")}</p>` : ""}
+    ${e.comentario_inversion ? `<p><i>${esc(e.comentario_inversion)}</i></p>` : ""}
+    ${e.precision_ubicacion === "baja" ? `<p class="chip warn">Ubicación aproximada</p>` : ""}
+  </details>`;
+}
+
+function bloqueComparables(p) {
+  const c = p.comparables || [];
+  if (!c.length) return "";
+  return `<details>
+    <summary>🏷️ ${c.length} comparables reciclados · mediana ${fmtUSD(p.usd_m2_comparables)}/m²</summary>
+    <ul>${c.map(x => `<li><a href="${urlSegura(x.url)}" target="_blank" rel="noopener">${esc(x.portal)}</a> · ${fmtUSD(x.precio_usd)} · ${Math.round(x.m2_cubiertos)} m² · ${fmtUSD(x.usd_m2)}/m²</li>`).join("")}</ul>
+  </details>`;
+}
+
+function botones(p) {
+  if (p.estado === "me_interesa")
+    return `<button class="btn neutro" data-id="${p.id}" data-accion="nueva">↩ Volver a nuevas</button>
+            <button class="btn no" data-id="${p.id}" data-accion="descartada">❌ Descartar</button>`;
+  if (p.estado === "descartada")
+    return `<button class="btn neutro" data-id="${p.id}" data-accion="nueva">↩ Restaurar</button>`;
+  return `<button class="btn si" data-id="${p.id}" data-accion="me_interesa">✅ Me interesa</button>
+          <button class="btn no" data-id="${p.id}" data-accion="descartada">❌ Descartar</button>`;
+}
+
+function tarjeta(p) {
+  const rebaja = p.rebaja_requerida_pct ?? 0;
+  const usdM2 = p.precio_usd / p.m2_cubiertos;
+  const descuentoVsComps = p.usd_m2_comparables ? 1 - usdM2 / p.usd_m2_comparables : null;
+  const oferta = rebaja <= 0
+    ? `<div class="oferta">💰 Rinde ≥15% a precio de lista · techo de compra ${fmtUSD(p.precio_max_compra)}</div>`
+    : `<div class="oferta warn">🤝 Ofertar hasta ${fmtUSD(p.precio_max_compra)} (rebaja −${fmtPct(rebaja)})</div>`;
+  const alt = (p.urls_alternativas || []).map((u, i) => `<a href="${urlSegura(u)}" target="_blank" rel="noopener">alt ${i + 1}</a>`).join(" · ");
+  return `<article class="card">
+    ${p.imagen_url ? `<div class="foto" style="background-image:url('${urlSegura(p.imagen_url)}')"></div>` : ""}
+    <div class="body">
+      <div class="row"><span class="barrio">${esc(p.barrio)} <span class="chip">${esc(p.zona)}</span></span><span class="precio">${fmtUSD(p.precio_usd)}</span></div>
+      <div class="meta">${esc(p.direccion || p.titulo || "Sin dirección")}</div>
+      <div class="chips">
+        <span class="chip">${p.ambientes ?? "?"} amb</span>
+        <span class="chip">${Math.round(p.m2_cubiertos)} m² cub.</span>
+        <span class="chip">${p.antiguedad != null ? p.antiguedad + " años" : "antig. s/d"}</span>
+        <span class="chip">${fmtUSD(usdM2)}/m²</span>
+        ${descuentoVsComps != null ? `<span class="chip ${descuentoVsComps > 0.3 ? "ok" : ""}">${fmtPct(descuentoVsComps)} bajo reciclados</span>` : ""}
+        ${p.expensas_usd ? `<span class="chip">Exp. ${fmtUSD(p.expensas_usd)}</span>` : ""}
+        <span class="chip ${(p.roi_media ?? 0) >= 0.15 ? "ok" : "warn"}">ROI Media ${fmtPct(p.roi_media)}</span>
+      </div>
+      ${oferta}
+      ${tablaEscenarios(p)}
+      ${bloqueEntorno(p)}
+      ${bloqueComparables(p)}
+      <div class="meta"><a href="${urlSegura(p.url)}" target="_blank" rel="noopener">Ver en ${esc(p.portal)}</a>${alt ? " · " + alt : ""}</div>
+    </div>
+    <div class="acciones">${botones(p)}</div>
+  </article>`;
+}
+
+function render() {
+  for (const e of ["nueva", "me_interesa", "descartada"])
+    document.getElementById("c-" + e).textContent = "(" + props.filter(p => p.estado === e).length + ")";
+  const q = document.getElementById("buscar").value.trim().toLowerCase();
+  let lista = props.filter(p => p.estado === filtroEstado);
+  if (q) lista = lista.filter(p => [p.barrio, p.direccion, p.portal, p.titulo, p.zona].join(" ").toLowerCase().includes(q));
+  ordenar(lista);
+  document.getElementById("lista").innerHTML = lista.length
+    ? lista.map(tarjeta).join("")
+    : `<div class="vacio">No hay propiedades en esta sección.</div>`;
+}
+
+document.querySelectorAll("[data-estado]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("[data-estado]").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); filtroEstado = b.dataset.estado; render();
+}));
+document.getElementById("orden").addEventListener("change", render);
+document.getElementById("buscar").addEventListener("input", render);
+document.getElementById("lista").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-accion]");
+  if (b) cambiarEstado(Number(b.dataset.id), b.dataset.accion, b);
+});
+document.getElementById("tema").addEventListener("click", () => {
+  const raiz = document.documentElement;
+  const oscuro = raiz.dataset.theme ? raiz.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  raiz.dataset.theme = oscuro ? "light" : "dark";
+  try { localStorage.setItem("tema", raiz.dataset.theme); } catch (e) {}
+});
+try { const t = localStorage.getItem("tema"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+
+render();
+cargar();
+</script>
+</body>
+</html>

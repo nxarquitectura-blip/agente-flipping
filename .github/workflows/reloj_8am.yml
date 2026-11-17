@@ -2,7 +2,7 @@ name: Agente Flipping Diario 8AM
 
 on:
   schedule:
-    - cron: '45 10 * * *' # 07:45 AM Argentina (UTC-3)
+    - cron: '45 10 * * *'
   workflow_dispatch:
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-        python main.py --solo-tablero
+          python main.py --solo-tablero
 
       - name: Publicar Tablero Actualizado en GitHub Pages
         if: always()

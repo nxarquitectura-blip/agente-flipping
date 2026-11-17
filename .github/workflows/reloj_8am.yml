@@ -19,7 +19,7 @@ jobs:
 
       - name: Instalar Dependencias
         run: |
-          pip install requests python-dotenv google-generativeai supabase apify-client
+          pip install requests python-dotenv google-genai supabase apify-client
 
       - name: Ejecutar Motor Principal
         env:

@@ -72,7 +72,7 @@ a{color:var(--accent)}
   <div class="top">
     <div>
       <h1>🏠 House Flipping · CABA + GBA Norte</h1>
-      <div class="meta"><span id="dot" class="dot"></span><span id="conexion">Conectando…</span> · Generado 17/11/2026 12:12</div>
+      <div class="meta"><span id="dot" class="dot"></span><span id="conexion">Conectando…</span> · Generado 17/11/2026 17:08</div>
     </div>
     <button class="tab" id="tema" title="Cambiar tema">🌓</button>
   </div>
@@ -122,7 +122,7 @@ async function cargar() {
     props = await r.json();
     estadoConexion(true, "Sincronizado con Supabase");
   } catch (e) {
-    estadoConexion(false, "Sin conexión: mostrando la copia del " + "17/11/2026 12:12");
+    estadoConexion(false, "Sin conexión: mostrando la copia del " + "17/11/2026 17:08");
   }
   render();
 }

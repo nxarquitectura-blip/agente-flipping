@@ -476,7 +476,7 @@ class RecolectorPortales:
             ahora = datetime.now(timezone.utc).isoformat()
             for a in nuevos:
                 lo, hi = cfg.COMPARABLES_USD_M2_RANGO
-                if a.reciclado is True and a.m2_cubiertos >= 30 and lo <= a.usd_m2 <= hi:
+                if a.reciclado is not False and a.m2_cubiertos >= 30 and lo <= a.usd_m2 <= hi:
                     filas.append({
                         "url": a.url, "portal": a.portal, "barrio": a.barrio,
                         "precio_usd": round(a.precio_usd, 2), "m2_cubiertos": a.m2_cubiertos,

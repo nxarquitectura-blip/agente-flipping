@@ -2,7 +2,7 @@ name: Agente Flipping Diario 8AM
 
 on:
   schedule:
-    - cron: '45 10 * * *'
+    - cron: '45 10 * * 1,3,5'
   workflow_dispatch:
 
 permissions:

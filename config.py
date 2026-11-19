@@ -231,26 +231,5 @@ PORTALES: tuple[Portal, ...] = (
         plantilla_busqueda="https://inmuebles.mercadolibre.com.ar/departamentos/venta/mas-de-3-ambientes/{ml_path}/_PriceRange_0USD-150000USD_OrderId_BEGINS*DESC_NoIndex_True",
         plantilla_comparables="https://inmuebles.mercadolibre.com.ar/departamentos/venta/mas-de-3-ambientes/{ml_path}/reciclado_NoIndex_True",
         actor_env="APIFY_ACTOR_MELI",
-    ),
-    Portal(
-        clave="mudafy",
-        nombre="Mudafy",
-        dominio="https://mudafy.com.ar",
-        plantilla_busqueda="https://mudafy.com.ar/venta/departamentos/{slug}?ambientes=3&precio-hasta=150000&moneda=USD",
-        actor_env="APIFY_ACTOR_MUDAFY",
-    ),
-    Portal(
-        clave="mitula",
-        nombre="Mitula",
-        dominio="https://departamentos.mitula.com.ar",
-        plantilla_busqueda="https://departamentos.mitula.com.ar/departamentos/venta-{slug}-3-ambientes?precio_max=150000&moneda=USD&orden=fecha",
-        actor_env="APIFY_ACTOR_MITULA",
-    ),
-    Portal(
-        clave="remax",
-        nombre="RE/MAX",
-        dominio="https://www.remax.com.ar",
-        plantilla_busqueda="https://www.remax.com.ar/departamentos-en-venta-en-{slug}?ambientes=3-mas&precio-hasta=150000&moneda=USD&orden=recientes",
-        actor_env="APIFY_ACTOR_REMAX",
-    ),
+  ),
 )

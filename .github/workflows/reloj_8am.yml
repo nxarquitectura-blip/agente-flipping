@@ -1,48 +1,117 @@
-name: Agente Flipping Diario 8AM
+name: Reloj 8AM - Motor House Flipping
 
 on:
   schedule:
+    # 07:45 Argentina (UTC-3, sin horario de verano) = 10:45 UTC. Lunes, miércoles y viernes.
+    # GitHub puede demorar algunos minutos los cron en horas pico.
     - cron: '45 10 * * 1,3,5'
   workflow_dispatch:
+    inputs:
+      modo:
+        description: "Modo de ejecución"
+        type: choice
+        default: completo
+        options: [completo, solo-tablero, dry-run]
 
 permissions:
-  contents: write
+  contents: write   # guarda index.html + informes/ en el repo (historial de informes)
+  pages: write      # publica en GitHub Pages
+  id-token: write   # requerido por actions/deploy-pages
+
+concurrency:
+  group: motor-house-flipping
+  cancel-in-progress: false
 
 jobs:
-  ejecutar-motor:
+  correr-motor:
     runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TABLERO_URL: ${{ vars.TABLERO_URL }}
+      # Opcionales: actores dedicados de Apify por portal (si no, crawler + Gemini).
+      # Portales activos: Zonaprop, Argenprop y MercadoLibre.
+      APIFY_ACTOR_ZONAPROP: ${{ vars.APIFY_ACTOR_ZONAPROP }}
+      APIFY_ACTOR_ARGENPROP: ${{ vars.APIFY_ACTOR_ARGENPROP }}
+      APIFY_ACTOR_MELI: ${{ vars.APIFY_ACTOR_MELI }}
+      PYTHONUNBUFFERED: "1"
+      TZ: America/Argentina/Buenos_Aires
+      MODO: ${{ github.event.inputs.modo || 'completo' }}
+
     steps:
-      - name: Clonar Repositorio
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.12"
+          cache: pip
 
-      - name: Instalar Dependencias
-        run: |
-          pip install requests python-dotenv google-genai supabase apify-client
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
 
-      - name: Ejecutar Motor Principal
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Correr el motor
         run: |
-          python main.py
+          case "$MODO" in
+            solo-tablero) python main.py --solo-tablero ;;
+            dry-run)      python main.py --dry-run ;;
+            *)            python main.py ;;
+          esac
 
-      - name: Publicar Tablero Actualizado en GitHub Pages
-        if: always()
+      # Los informes se guardan en el repo porque sólo la corrida que aprueba un PH
+      # tiene su ficha completa en memoria: así no se pierden entre publicaciones.
+      - name: Guardar tablero e informes en el repo
+        if: always() && env.MODO != 'dry-run'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html
-          git diff --staged --quiet || git commit -m "Actualizar tablero diario"
-          git push
+          if [ -f index.html ]; then
+            git config user.name "motor-flipping-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add index.html
+            if [ -d informes ]; then git add informes; fi
+            if git diff --cached --quiet; then
+              echo "Tablero sin cambios."
+            else
+              git commit -m "Tablero $(date +%Y-%m-%d)"
+              git pull --rebase
+              git push
+            fi
+          fi
+
+      - name: Armar sitio para GitHub Pages
+        id: sitio
+        if: always() && env.MODO != 'dry-run'
+        run: |
+          if [ ! -f index.html ]; then
+            echo "No se generó index.html: no hay nada para publicar."
+            exit 1
+          fi
+          rm -rf _site && mkdir -p _site
+          cp index.html _site/
+          if [ -d informes ]; then cp -r informes _site/; fi
+          touch _site/.nojekyll
+          echo "Archivos a publicar: $(find _site -type f | wc -l)"
+
+      - name: Subir artefacto de Pages
+        if: always() && steps.sitio.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  publicar-pages:
+    needs: correr-motor
+    if: always() && needs.correr-motor.result != 'skipped' && github.event.inputs.modo != 'dry-run'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

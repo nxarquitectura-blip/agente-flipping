@@ -232,7 +232,7 @@ PORTALES: tuple[Portal, ...] = (
         nombre="Argenprop",
         dominio="https://www.argenprop.com",
         plantilla_busqueda="https://www.argenprop.com/ph/venta/{slug}/3-ambientes-o-mas/dolares-hasta-150000?orden-masnuevos",
-        plantilla_comparables="https://www.argenprop.com/ph/venta/{slug}/3-ambientes-o-mas?palabra-clave=reciclado&orden-masnuevos",
+        plantilla_comparables="https://www.argenprop.com/ph/venta/{slug}/3-ambientes-o-mas?estado-excelente&orden-masnuevos",
         actor_env="APIFY_ACTOR_ARGENPROP",
     ),
     Portal(

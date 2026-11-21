@@ -34,17 +34,24 @@ ENTORNO_VACIO: dict[str, Any] = {
     "precision_ubicacion": "baja",
     "resumen": "",
     "comentario_inversion": "",
+    # Bloque "Cómo es la zona" del informe individual
+    "zona_ubicacion": "",
+    "zona_comercio": "",
+    "zona_movilidad": "",
+    "zona_perfil_comprador": "",
+    "zona_dia_y_noche": "",
     "fuentes": [],
 }
+CAMPOS_ZONA = ("zona_ubicacion", "zona_comercio", "zona_movilidad", "zona_perfil_comprador", "zona_dia_y_noche")
 
 PROMPT = """Actuás como analista inmobiliario senior especializado en House Flipping en CABA y GBA Norte.
 
 Propiedad a analizar:
 - Dirección: {direccion}
 - Barrio: {barrio} ({zona}), Argentina
-- Tipo: departamento/PH de {ambientes} ambientes, {m2} m² cubiertos, antigüedad: {antiguedad}
+- Tipo: PH usado de {ambientes} ambientes, {m2} m² cubiertos, antigüedad: {antiguedad}
 - Precio publicado: USD {precio:,.0f}  |  Valor estimado reciclado: USD {valor:,.0f}
-- ROI escenario Reforma Media: {roi:.1%}
+- ROI escenario obra Intermedia: {roi:.1%}
 
 Investigá con Google Search / Google Maps el entorno en un radio de 3 a 4 cuadras (300-400 metros):
 1. Estaciones de SUBTE (línea y estación) y distancia aproximada en cuadras.
@@ -70,7 +77,12 @@ Respondé ÚNICAMENTE con un objeto JSON válido (sin ```), con esta estructura 
   "impacto_reventa": "positivo | neutro | negativo",
   "precision_ubicacion": "alta | media | baja",
   "resumen": "2-3 oraciones sobre conectividad y atractivo para un comprador final",
-  "comentario_inversion": "1-2 oraciones: ¿el entorno justifica el valor de reventa estimado?"
+  "comentario_inversion": "1-2 oraciones: ¿el entorno justifica el valor de reventa estimado?",
+  "zona_ubicacion": "2-3 oraciones: dónde queda exactamente dentro del barrio, entre qué calles/referencias, tipo de cuadra (residencial, PH, comercial)",
+  "zona_comercio": "2-3 oraciones: comercio de cercanía, supermercados, polos gastronómicos o ejes comerciales",
+  "zona_movilidad": "2-3 oraciones: subte, tren, colectivos, Metrobús y avenidas, con distancias en cuadras",
+  "zona_perfil_comprador": "2-3 oraciones: quién compra un PH reciclado acá (familias, parejas jóvenes, etc.) y qué valora",
+  "zona_dia_y_noche": "2-3 oraciones: cómo es la cuadra de día y de noche (movimiento, ruido, iluminación, seguridad percibida)"
 }}"""
 
 
@@ -164,6 +176,8 @@ class AnalistaEntorno:
             limpio["puntaje_entorno"] = None
         if limpio["impacto_reventa"] not in ("positivo", "neutro", "negativo"):
             limpio["impacto_reventa"] = "desconocido"
+        for clave in CAMPOS_ZONA:
+            limpio[clave] = str(limpio[clave] or "").strip()[:1200]
         return limpio
 
 

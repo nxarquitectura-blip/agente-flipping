@@ -70,7 +70,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")   # solo backend
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")         # va al tablero web
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TABLERO_URL = os.getenv("TABLERO_URL", "")  # ej: https://usuario.github.io/flip-motor/
@@ -79,6 +79,7 @@ TABLA_PROPIEDADES = os.getenv("TABLA_PROPIEDADES", "propiedades")
 TABLA_COMPARABLES = os.getenv("TABLA_COMPARABLES", "comparables")
 
 TABLERO_HTML = BASE_DIR / "index.html"
+INFORMES_DIR = BASE_DIR / "informes"   # informes/<huella>.html, publicados junto al tablero
 
 
 def requerir(*nombres: str) -> None:
@@ -175,12 +176,22 @@ class Filtros:
 
 FILTROS = Filtros()
 
-# Comparables "reciclados a nuevo"
+# Comparables: PH reciclados del mismo barrio
 COMPARABLES_MIN = 4
 COMPARABLES_MAX = 5
 COMPARABLES_VIGENCIA_DIAS = 60
-COMPARABLES_TOLERANCIA_M2 = 0.35   # ±35 % de superficie
-COMPARABLES_USD_M2_RANGO = (900, 6_000)  # sanity check
+COMPARABLES_AMBIENTES_TOLERANCIA = 1        # ±1 ambiente como máximo
+# Rango de m² cubiertos como fracción de los m² del aviso. El primero es el
+# estricto; los siguientes sólo se usan si no se llega a COMPARABLES_MIN.
+COMPARABLES_RANGOS_M2: tuple[tuple[float, float], ...] = (
+    (0.65, 1.40),
+    (0.55, 1.60),
+    (0.45, 1.80),
+)
+COMPARABLES_USD_M2_RANGO = (900, 6_000)     # descarta USD/m² absurdos
+COMPARABLES_RECORTE_OUTLIERS = 0.10         # recorta 10 % superior e inferior…
+COMPARABLES_MUESTRA_PARA_RECORTE = 10       # …cuando hay al menos 10 comparables
+# El −5 % de cierre y las fórmulas financieras viven en motor_financiero.ParametrosMercado.
 
 
 # --------------------------------------------------------------------------- #
@@ -212,24 +223,24 @@ PORTALES: tuple[Portal, ...] = (
         clave="zonaprop",
         nombre="Zonaprop",
         dominio="https://www.zonaprop.com.ar",
-        plantilla_busqueda="https://www.zonaprop.com.ar/departamentos-ph-venta-{slug}-desde-3-ambientes-menos-150000-dolar-orden-publicado-descendente.html",
-        plantilla_comparables="https://www.zonaprop.com.ar/departamentos-ph-venta-{slug}-desde-3-ambientes-reciclado-orden-publicado-descendente.html",
+        plantilla_busqueda="https://www.zonaprop.com.ar/ph-venta-{slug}-desde-3-ambientes-menos-150000-dolar-orden-publicado-descendente.html",
+        plantilla_comparables="https://www.zonaprop.com.ar/ph-venta-{slug}-desde-3-ambientes-reciclado-orden-publicado-descendente.html",
         actor_env="APIFY_ACTOR_ZONAPROP",
     ),
     Portal(
         clave="argenprop",
         nombre="Argenprop",
         dominio="https://www.argenprop.com",
-        plantilla_busqueda="https://www.argenprop.com/departamentos-y-ph/venta/{slug}/3-ambientes-o-mas/dolares-hasta-150000?orden-masnuevos",
-        plantilla_comparables="https://www.argenprop.com/departamentos-y-ph/venta/{slug}/3-ambientes-o-mas?palabra-clave=reciclado&orden-masnuevos",
+        plantilla_busqueda="https://www.argenprop.com/ph/venta/{slug}/3-ambientes-o-mas/dolares-hasta-150000?orden-masnuevos",
+        plantilla_comparables="https://www.argenprop.com/ph/venta/{slug}/3-ambientes-o-mas?palabra-clave=reciclado&orden-masnuevos",
         actor_env="APIFY_ACTOR_ARGENPROP",
     ),
     Portal(
         clave="mercadolibre",
         nombre="MercadoLibre",
         dominio="https://inmuebles.mercadolibre.com.ar",
-        plantilla_busqueda="https://inmuebles.mercadolibre.com.ar/departamentos/venta/mas-de-3-ambientes/{ml_path}/_PriceRange_0USD-150000USD_OrderId_BEGINS*DESC_NoIndex_True",
-        plantilla_comparables="https://inmuebles.mercadolibre.com.ar/departamentos/venta/mas-de-3-ambientes/{ml_path}/reciclado_NoIndex_True",
+        plantilla_busqueda="https://inmuebles.mercadolibre.com.ar/ph/venta/mas-de-3-ambientes/{ml_path}/_PriceRange_0USD-150000USD_OrderId_BEGINS*DESC_NoIndex_True",
+        plantilla_comparables="https://inmuebles.mercadolibre.com.ar/ph/venta/mas-de-3-ambientes/{ml_path}/reciclado_NoIndex_True",
         actor_env="APIFY_ACTOR_MELI",
-  ),
+    ),
 )

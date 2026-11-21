@@ -1,6 +1,6 @@
 """
-recolector_portales.py — Extracción de avisos de Zonaprop, Argenprop, MercadoLibre,
-Mudafy, Mitula y RE/MAX vía Apify.
+recolector_portales.py — Extracción de avisos de Zonaprop, Argenprop y MercadoLibre
+vía Apify.
 
 Estrategia por portal:
   1. Si hay un actor dedicado configurado (APIFY_ACTOR_<PORTAL>), se usa ese actor
@@ -10,12 +10,16 @@ Estrategia por portal:
      JSON estructurado. Es resistente a cambios de diseño de los portales.
 
 Luego:
+  • Sólo PH usados: se descarta de inmediato todo lo que no sea PH (departamentos,
+    casas, oficinas, cocheras, lotes) y todo lo "a estrenar / en pozo / en
+    construcción / emprendimiento / preventa". Aplica a avisos Y comparables.
   • Filtros: 18 barrios, 3+ ambientes, ≤ USD 150k, > 40 m² cubiertos,
     antigüedad > 20 años, publicados en los últimos 3 días.
   • Anti-duplicados: huella (dirección + m² + ambientes) entre portales y contra
     lo ya guardado en Supabase.
-  • Comparables: 4-5 avisos "reciclados a nuevo" del mismo barrio y superficie
-    similar, cacheados en Supabase (tabla `comparables`) para no re-scrapear a diario.
+  • Comparables: PH reciclados del mismo barrio, ±1 ambiente y 65 %-140 % de los
+    m² del aviso (se relaja sólo el rango de m² si faltan), sin outliers,
+    cacheados en Supabase (tabla `comparables`) para no re-scrapear a diario.
 """
 from __future__ import annotations
 
@@ -60,6 +64,8 @@ class Aviso:
     dias_publicado: Optional[int] = None
     imagen_url: Optional[str] = None
     reciclado: Optional[bool] = None
+    tipo_propiedad: str = ""
+    descripcion: str = ""
     urls_alternativas: list[str] = field(default_factory=list)
     huella: str = ""
 
@@ -81,12 +87,40 @@ class Comparable:
     usd_m2: float
     ambientes: Optional[int] = None
     titulo: str = ""
+    estado: str = ""   # Reciclado a nuevo / Reciclado / Parcialmente reciclado / Muy bueno / Excelente
+    capturado_en: str = ""
+
+
+class FichaPH(BaseModel):
+    """Ficha completa de la página individual de un PH aprobado."""
+    tipo: Optional[str] = Field(None, description="Tipo de propiedad, ej. PH")
+    disposicion: Optional[str] = Field(None, description="Frente, contrafrente, interno, lateral")
+    m2_cubiertos: Optional[float] = None
+    m2_totales: Optional[float] = None
+    m2_patio: Optional[float] = None
+    m2_terraza: Optional[float] = None
+    ambientes: Optional[int] = None
+    dormitorios: Optional[int] = None
+    banos: Optional[int] = None
+    antiguedad_anios: Optional[int] = None
+    estado: Optional[str] = Field(None, description="Estado de conservación tal como lo describe el aviso")
+    planta_piso: Optional[str] = Field(None, description="Planta baja, 1er piso, etc.")
+    unidades_en_lote: Optional[int] = Field(None, description="Cantidad de unidades del PH si figura")
+    expensas: Optional[float] = None
+    moneda_expensas: Optional[str] = Field(None, description="ARS o USD")
+    apto_credito: Optional[bool] = None
+    inmobiliaria: Optional[str] = None
+    matricula: Optional[str] = Field(None, description="Matrícula del corredor (CUCICBA, CMCPSI, etc.)")
+    otros: list[str] = Field(default_factory=list, description="Extras: patio, terraza, parrilla, luminoso, etc.")
+    descripcion: Optional[str] = Field(None, description="Descripción del aviso, hasta 1500 caracteres")
 
 
 class AvisoExtraido(BaseModel):
     """Esquema que Gemini completa para cada aviso de una página de resultados."""
     url: Optional[str] = Field(None, description="Link a la ficha del aviso")
+    tipo_propiedad: Optional[str] = Field(None, description="PH, departamento, casa, oficina, cochera, lote u otro")
     titulo: Optional[str] = None
+    descripcion: Optional[str] = Field(None, description="Hasta 300 caracteres del texto de la tarjeta")
     direccion: Optional[str] = Field(None, description="Calle y altura, tal como figura")
     barrio: Optional[str] = None
     precio: Optional[float] = Field(None, description="Número sin separadores de miles")
@@ -228,19 +262,26 @@ class ExtractorAvisosIA:
     PROMPT = """Sos un extractor de datos inmobiliarios de Argentina.
 Te paso el contenido (markdown) de una página de RESULTADOS del portal {portal}: {url}
 
-Extraé TODOS los avisos de venta de departamentos o PH listados. Reglas:
+Extraé ÚNICAMENTE los avisos de venta de PH USADOS (propiedad horizontal). Reglas:
+- OMITÍ por completo (no los devuelvas) los avisos que NO sean PH: departamentos en edificio
+  tradicional, casas, oficinas, cocheras, locales, lotes o terrenos.
+- OMITÍ por completo los avisos a estrenar (obra nueva), en pozo, en construcción, emprendimientos,
+  pre-venta / preventa, "proyecto", "obra en curso" o con entrega en 2026, 2027 o 2028.
+  Un PH usado "reciclado a estrenar" SÍ se incluye: es usado y está reciclado.
+- tipo_propiedad: "PH" si el aviso dice PH o propiedad horizontal; si no, el tipo que figure.
+- descripcion: hasta 300 caracteres del texto que acompaña al aviso en la tarjeta (sin inventar).
 - url: link absoluto a la ficha del aviso. Si es relativo, anteponé {dominio}.
 - precio: número sin separadores. moneda = "USD" si dice USD/U$S/US$/u$d, "ARS" si sólo dice $.
 - m2_cubiertos: superficie CUBIERTA. Si sólo figura una superficie total, ponela en m2_totales y dejá m2_cubiertos en null.
 - ambientes: si sólo figuran dormitorios, ambientes = dormitorios + 1. Monoambiente = 1.
-- antiguedad_anios: 0 si dice "a estrenar". null si no figura.
+- antiguedad_anios: años del edificio. 0 sólo si es obra nueva a estrenar (no por estar reciclado). null si no figura.
 - expensas y moneda_expensas si figuran.
 - dias_publicado: "hoy"=0, "ayer"=1, "hace N días"=N, "hace N semanas"=N*7, "más de un mes"=31. null si no figura.
 - reciclado: true si el texto dice reciclado / a nuevo / totalmente renovado / refaccionado a estrenar;
   false si dice a reciclar / para refaccionar / a refaccionar / a actualizar; null si no se sabe.
 - imagen_url: URL de la foto principal si aparece.
 - NO inventes datos. Lo que no figure va en null.
-- Ignorá emprendimientos en pozo, banners publicitarios y avisos de alquiler."""
+- Ignorá banners publicitarios y avisos de alquiler."""
 
     def __init__(self, api_key: str, modelo: str = cfg.GEMINI_MODEL):
         from google import genai
@@ -271,12 +312,49 @@ Extraé TODOS los avisos de venta de departamentos o PH listados. Reglas:
 
         return con_reintentos(_llamar, etiqueta=f"Gemini extracción {portal.nombre}")
 
+    PROMPT_FICHA = """Sos un extractor de datos inmobiliarios de Argentina.
+Te paso el contenido (markdown) de la página INDIVIDUAL de un aviso de venta de un PH en {portal}: {url}
+Extraé la ficha técnica completa del inmueble. Reglas:
+- Usá sólo lo que figura en la página. Lo que no figure va en null (u otros = []).
+- m2_cubiertos / m2_totales / m2_patio / m2_terraza: números en m², sin unidades.
+- ambientes: si sólo figuran dormitorios, ambientes = dormitorios + 1.
+- antiguedad_anios: años del edificio; 0 sólo si es a estrenar.
+- planta_piso: texto corto ("Planta baja", "1° piso por escalera").
+- expensas y moneda_expensas tal como figuran.
+- apto_credito: true si dice apto crédito / apto banco; false si dice no apto; null si no dice.
+- inmobiliaria y matricula del corredor que publica, si figuran.
+- otros: hasta 10 características relevantes (patio, terraza, parrilla, lavadero, luminoso, etc.).
+- descripcion: la descripción del aviso, hasta 1500 caracteres, sin datos de contacto."""
+
+    def extraer_ficha(self, portal_nombre: str, url: str, markdown: str) -> Optional[dict]:
+        if not markdown or len(markdown) < 300:
+            return None
+        prompt = self.PROMPT_FICHA.format(portal=portal_nombre, url=url)
+
+        def _llamar() -> Optional[dict]:
+            resp = self.cliente.models.generate_content(
+                model=self.modelo,
+                contents=[prompt, markdown[: self.MAX_CARACTERES]],
+                config=self._types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FichaPH,
+                    temperature=0,
+                ),
+            )
+            f = resp.parsed
+            if f is None:
+                return None
+            return f.model_dump() if isinstance(f, BaseModel) else dict(f)
+
+        return con_reintentos(_llamar, etiqueta=f"Gemini ficha {portal_nombre}")
+
 
 # =========================================================================== #
 # Normalización de items de actores dedicados
 # =========================================================================== #
 _CLAVES_ACTOR = {
     "url": ["url", "link", "permalink", "postingUrl", "detailUrl", "propertyUrl"],
+    "tipo_propiedad": ["propertyType", "tipo_propiedad", "realEstateType.name", "realEstateType", "property_type", "category"],
     "titulo": ["title", "titulo", "name", "headline"],
     "direccion": ["address", "direccion", "location.address", "streetAddress", "postingLocation.address.name"],
     "barrio": ["neighborhood", "barrio", "location.neighborhood", "location.name", "zone"],
@@ -335,7 +413,103 @@ def normalizar_item_actor(item: dict) -> dict:
         datos["reciclado"] = True
     if isinstance(datos.get("imagen_url"), dict):
         datos["imagen_url"] = datos["imagen_url"].get("url")
+    if isinstance(datos.get("tipo_propiedad"), dict):
+        datos["tipo_propiedad"] = datos["tipo_propiedad"].get("name") or datos["tipo_propiedad"].get("nombre")
     return datos
+
+
+# =========================================================================== #
+# Exclusión estricta: sólo PH usados
+# =========================================================================== #
+# Todas las regex corren sobre normalizar_texto(): minúsculas, sin tildes y con
+# guiones/barras convertidos en espacios ("pre-venta" → "pre venta", "/ph/" → " ph ").
+_RE_ES_PH = re.compile(r"\b(ph|p h|propiedad horizontal)\b")
+_RE_TIPO_NO_PH = re.compile(
+    r"\b(departamentos?|depto|dpto|monoambiente|casa|casas|oficinas?|cocheras?|lotes?|terrenos?|"
+    r"locales?|local comercial|galpon|deposito|fondo de comercio|edificio)\b"
+)
+_RE_OBRA_NUEVA = re.compile(
+    r"\b(en pozo|desde el pozo|en construccion|emprendimientos?|pre ?venta|"
+    r"entrega (en |prevista |estimada |para )?(\w+ )?(de )?20(26|27|28)|obra en curso)\b"
+)
+_RE_A_ESTRENAR = re.compile(r"\ba estrenar\b")
+_RE_PROYECTO = re.compile(r"\bproyecto\b")
+# "reciclado a estrenar" es un PH usado reciclado: no es obra nueva.
+_RE_RECICLADO_PREVIO = re.compile(r"(reciclad|refaccionad|renovad|remodelad)\w*( \w+){0,2} $")
+# "ideal para tu proyecto" describe un PH a reciclar, no un emprendimiento.
+_RE_IDEAL_PREVIO = re.compile(r"ideal( \w+){0,2} $")
+
+
+def _hay_coincidencia_real(regex: re.Pattern, texto: str, excepcion_previa: re.Pattern) -> bool:
+    for m in regex.finditer(texto):
+        if not excepcion_previa.search(texto[max(0, m.start() - 40): m.start()]):
+            return True
+    return False
+
+
+def motivo_exclusion(
+    titulo: str = "",
+    descripcion: str = "",
+    url: str = "",
+    tipo_propiedad: str = "",
+    antiguedad: Optional[int] = None,
+) -> Optional[str]:
+    """Devuelve el motivo por el que el aviso NO es un PH usado, o None si pasa."""
+    tipo = normalizar_texto(tipo_propiedad)
+    tit = normalizar_texto(titulo)
+    texto = normalizar_texto(f"{titulo} {descripcion}")
+    texto_url = normalizar_texto(urlsplit(url).path if url else "")
+
+    # 1) Tipo de propiedad
+    if tipo:
+        if not _RE_ES_PH.search(tipo):
+            return f"no es PH (tipo: {tipo_propiedad})"
+    elif not _RE_ES_PH.search(f"{texto} {texto_url}"):
+        m = _RE_TIPO_NO_PH.search(tit)
+        if m:
+            return f"no es PH (título dice '{m.group(0)}')"
+
+    # 2) Obra nueva / pozo / emprendimiento
+    if antiguedad == 0:
+        return "a estrenar (antigüedad 0)"
+    todo = f"{texto} {texto_url}"
+    m = _RE_OBRA_NUEVA.search(todo)
+    if m:
+        return f"obra nueva ('{m.group(0)}')"
+    if _hay_coincidencia_real(_RE_A_ESTRENAR, todo, _RE_RECICLADO_PREVIO):
+        return "a estrenar"
+    if _hay_coincidencia_real(_RE_PROYECTO, todo, _RE_IDEAL_PREVIO):
+        return "proyecto / emprendimiento"
+    return None
+
+
+def clasificar_estado(texto: str) -> str:
+    """Estado de conservación de un comparable, para mostrar en el informe."""
+    t = normalizar_texto(texto)
+    if re.search(r"\bparcialmente (reciclad|refaccionad|renovad)", t):
+        return "Parcialmente reciclado"
+    if re.search(r"\b(reciclad[oa]s? (totalmente )?a (nuevo|estrenar)|a nuevo|totalmente reciclad[oa]|"
+                 r"reciclad[oa] por completo|reciclado integral|reciclaje integral)\b", t):
+        return "Reciclado a nuevo"
+    if re.search(r"\bexcelente\b", t):
+        return "Excelente"
+    if re.search(r"\bmuy buen[oa]?\b", t):
+        return "Muy bueno"
+    # Todos los comparables salen de búsquedas "reciclado": es el estado por defecto.
+    return "Reciclado"
+
+
+def recortar_outliers(comps: list[Comparable]) -> list[Comparable]:
+    """Recorta el 10 % superior e inferior de USD/m² con muestra suficiente;
+    con muestra chica descarta lo que se aleje más de ±35 % de la mediana."""
+    if len(comps) >= cfg.COMPARABLES_MUESTRA_PARA_RECORTE:
+        ordenados = sorted(comps, key=lambda c: c.usd_m2)
+        k = int(len(ordenados) * cfg.COMPARABLES_RECORTE_OUTLIERS)
+        return ordenados[k: len(ordenados) - k] if k else ordenados
+    if len(comps) >= 3:
+        med = statistics.median(c.usd_m2 for c in comps)
+        return [c for c in comps if abs(c.usd_m2 - med) <= med * 0.35]
+    return list(comps)
 
 
 # =========================================================================== #
@@ -417,6 +591,7 @@ class EstadisticasRecoleccion:
     crudos: int = 0
     pasan_filtros: int = 0
     nuevos: int = 0
+    excluidos_no_ph: int = 0   # no PH, a estrenar, pozo, emprendimiento (avisos + comparables)
     errores: list[str] = field(default_factory=list)
 
 
@@ -489,22 +664,70 @@ class RecolectorPortales:
             self._comparables = self._cargar_comparables(nombres_barrios)
 
     def comparables_para(self, aviso: Aviso) -> list[Comparable]:
-        """Hasta 5 comparables reciclados del mismo barrio con m² y ambientes similares."""
-        tol = cfg.COMPARABLES_TOLERANCIA_M2
+        """
+        Hasta COMPARABLES_MAX PH reciclados del MISMO barrio y producto similar:
+          • ±1 ambiente como máximo (comparables sin ambientes informados no entran).
+          • 65 %-140 % de los m² cubiertos del aviso; si no se llega al mínimo, se
+            relaja SÓLO el rango de m² (nunca el barrio ni el tipo de propiedad).
+          • Sin USD/m² absurdos y sin outliers (recorte 10 % / 10 % con muestra suficiente).
+        """
         urls_propias = {aviso.url, *aviso.urls_alternativas}
-        pool = [
+        lo_usd, hi_usd = cfg.COMPARABLES_USD_M2_RANGO
+        tol_amb = cfg.COMPARABLES_AMBIENTES_TOLERANCIA
+        base = [
             c for c in self._comparables.get(aviso.barrio, [])
             if c.url not in urls_propias
-            and abs(c.m2_cubiertos - aviso.m2_cubiertos) <= aviso.m2_cubiertos * tol
-            and (c.ambientes is None or aviso.ambientes is None or abs(c.ambientes - aviso.ambientes) <= 1)
+            and lo_usd <= c.usd_m2 <= hi_usd
+            and (aviso.ambientes is None or (c.ambientes is not None and abs(c.ambientes - aviso.ambientes) <= tol_amb))
         ]
-        pool.sort(key=lambda c: abs(c.m2_cubiertos - aviso.m2_cubiertos))
-        candidatos = pool[: cfg.COMPARABLES_MAX + 3]
-        # Descarta outliers (±35 % de la mediana) antes de quedarnos con los 5 más parecidos.
-        if len(candidatos) >= 3:
-            med = statistics.median(c.usd_m2 for c in candidatos)
-            candidatos = [c for c in candidatos if abs(c.usd_m2 - med) <= med * 0.35]
-        return candidatos[: cfg.COMPARABLES_MAX]
+        m2 = aviso.m2_cubiertos
+        pool: list[Comparable] = []
+        for f_min, f_max in cfg.COMPARABLES_RANGOS_M2:
+            pool = recortar_outliers([c for c in base if f_min * m2 <= c.m2_cubiertos <= f_max * m2])
+            if len(pool) >= cfg.COMPARABLES_MIN:
+                break
+        pool.sort(key=lambda c: (abs((c.ambientes or 0) - (aviso.ambientes or 0)), abs(c.m2_cubiertos - m2)))
+        return pool[: cfg.COMPARABLES_MAX]
+
+    def detallar_aprobadas(self, filas: list[dict]) -> dict[str, dict]:
+        """
+        Scrapea la página individual SÓLO de los PH aprobados (una corrida de Apify
+        para todos) y devuelve {url: ficha}. Si falla, devuelve lo que haya podido.
+        """
+        urls = [f["url"] for f in filas if f.get("url")]
+        if not urls:
+            return {}
+        portal_de = {f["url"]: f.get("portal") or "" for f in filas}
+        clave = lambda u: (urlsplit(u).netloc.lower().removeprefix("www."), urlsplit(u).path.rstrip("/"))  # noqa: E731
+        por_clave = {clave(u): u for u in urls}
+
+        log.info("Scrapeando la ficha de %d PH aprobados…", len(urls))
+        try:
+            paginas = self.apify.crawlear(urls)
+        except Exception as exc:  # noqa: BLE001 — sin ficha igual se genera el informe
+            self.stats.errores.append(f"Fichas de aprobadas: {exc}")
+            log.exception("No se pudieron scrapear las fichas")
+            return {}
+
+        def procesar(pagina: dict) -> tuple[Optional[str], Optional[dict]]:
+            candidatas = [pagina.get("url"), _obtener(pagina, "crawl.loadedUrl"), _obtener(pagina, "metadata.canonicalUrl")]
+            original = next((por_clave.get(clave(u)) for u in candidatas if u and por_clave.get(clave(u))), None)
+            if original is None:
+                return None, None
+            markdown = pagina.get("markdown") or pagina.get("text") or ""
+            try:
+                return original, self.extractor.extraer_ficha(portal_de.get(original, ""), original, markdown)
+            except Exception as exc:  # noqa: BLE001
+                self.stats.errores.append(f"Ficha {original}: {exc}")
+                return original, None
+
+        fichas: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for url, ficha in pool.map(procesar, paginas):
+                if url and ficha:
+                    fichas[url] = ficha
+        log.info("Fichas obtenidas: %d/%d", len(fichas), len(urls))
+        return fichas
 
     # ------------------------------------------------------------------ #
     # Scraping
@@ -597,6 +820,16 @@ class RecolectorPortales:
                 expensas = expensas / self.tipo_cambio
             expensas = round(expensas, 2) if 0 < expensas < 2000 else None
 
+        titulo = str(datos.get("titulo") or "")[:300]
+        descripcion = str(datos.get("descripcion") or "")[:600]
+        tipo = str(datos.get("tipo_propiedad") or "")[:60]
+        antiguedad = a_entero(datos.get("antiguedad_anios"))
+        motivo = motivo_exclusion(titulo, descripcion, url, tipo, antiguedad)
+        if motivo:
+            self.stats.excluidos_no_ph += 1
+            log.debug("Excluido %s: %s", url, motivo)
+            return None
+
         reciclado = datos.get("reciclado")
         return Aviso(
             portal=portal.nombre,
@@ -607,13 +840,15 @@ class RecolectorPortales:
             m2_cubiertos=m2,
             m2_totales=m2_tot,
             ambientes=a_entero(datos.get("ambientes")),
-            titulo=str(datos.get("titulo") or "")[:300],
+            titulo=titulo,
             direccion=str(datos.get("direccion") or "")[:200],
-            antiguedad=a_entero(datos.get("antiguedad_anios")),
+            antiguedad=antiguedad,
             expensas_usd=expensas,
             dias_publicado=a_entero(datos.get("dias_publicado")),
             imagen_url=datos.get("imagen_url") if str(datos.get("imagen_url") or "").startswith("http") else None,
             reciclado=reciclado if isinstance(reciclado, bool) else None,
+            tipo_propiedad=tipo,
+            descripcion=descripcion,
         )
 
     # ------------------------------------------------------------------ #
@@ -637,11 +872,17 @@ class RecolectorPortales:
         )
         por_barrio: dict[str, list[Comparable]] = {}
         for f in filas:
+            titulo = f.get("titulo") or ""
+            # El caché puede tener comparables guardados antes del filtro "sólo PH usados".
+            if motivo_exclusion(titulo, "", f["url"]):
+                continue
             por_barrio.setdefault(f["barrio"], []).append(
                 Comparable(
                     url=f["url"], portal=f.get("portal") or "", barrio=f["barrio"],
                     precio_usd=float(f["precio_usd"]), m2_cubiertos=float(f["m2_cubiertos"]),
-                    usd_m2=float(f["usd_m2"]), ambientes=f.get("ambientes"), titulo=f.get("titulo") or "",
+                    usd_m2=float(f["usd_m2"]), ambientes=f.get("ambientes"), titulo=titulo,
+                    estado=clasificar_estado(titulo),
+                    capturado_en=str(f.get("capturado_en") or ""),
                 )
             )
         return por_barrio

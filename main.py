@@ -2,12 +2,15 @@
 main.py — Orquestador del Agente de House Flipping (CABA + GBA Norte).
 
 Flujo diario:
-    1. Recolecta avisos nuevos de los 6 portales (filtros + anti-duplicados).
-    2. Cruza cada aviso con 4-5 comparables reciclados a nuevo.
-    3. Corre el motor financiero (3 escenarios + descarte automático).
+    1. Recolecta PH usados nuevos de los 3 portales (filtros + anti-duplicados).
+    2. Cruza cada aviso con 4-5 comparables PH reciclados del mismo barrio.
+    3. Corre el motor financiero (3 niveles de obra × valor de reventa
+       pesimista / base / optimista + descarte automático).
     4. Analiza el entorno de las oportunidades aprobadas con Gemini.
+    4b. Scrapea la ficha individual SÓLO de los PH aprobados.
     5. Guarda todo en Supabase.
-    6. Genera el Tablero Web (index.html) con botones sincronizados a Supabase.
+    6. Genera un informe web por PH aprobado (informes/<huella>.html) y el
+       Tablero Web (index.html) con botones sincronizados a Supabase.
     7. Envía el resumen diario por Telegram.
 
 Uso:
@@ -23,14 +26,17 @@ import html
 import json
 import logging
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 import requests
 
 import config as cfg
+import generador_informes
 from analista_ia import AnalistaEntorno
 from motor_financiero import MotorFinanciero, ResultadoAnalisis
 from recolector_portales import (
@@ -40,7 +46,7 @@ from recolector_portales import (
     ExtractorAvisosIA,
     RecolectorPortales,
 )
-from supabase_db import SupabaseREST
+from supabase_db import ErrorSupabase, SupabaseREST
 
 log = logging.getLogger("main")
 ART = timezone(timedelta(hours=-3))  # Argentina no usa horario de verano
@@ -55,6 +61,7 @@ class ResumenCorrida:
     crudos: int = 0
     pasan_filtros: int = 0
     nuevos: int = 0
+    excluidos_no_ph: int = 0
     aprobadas: list[dict] = field(default_factory=list)
     descartadas_auto: int = 0
     sin_comparables: int = 0
@@ -70,7 +77,14 @@ def construir_fila(
     analisis: Optional[ResultadoAnalisis],
     motivo: str,
 ) -> dict:
-    escenarios = analisis.to_dict()["escenarios"] if analisis else {}
+    escenarios: dict = {}
+    if analisis:
+        d = analisis.to_dict()
+        escenarios = dict(d["escenarios"])
+        # Se guarda dentro del jsonb `escenarios` para no tocar el esquema de Supabase.
+        escenarios["Reventa"] = {
+            k: {**v, "usd_m2": d["usd_m2_reventa"][k]} for k, v in d["sensibilidad"].items()
+        }
     base = analisis.base if analisis else None
 
     def roi(nombre: str) -> Optional[float]:
@@ -105,8 +119,9 @@ def construir_fila(
         "usd_m2_comparables": analisis.usd_m2_reciclado if analisis else None,
         "valor_venta_estimado": analisis.valor_reciclado_100 if analisis else None,
         "escenarios": escenarios,
-        "roi_minima": roi("Mínima"),
-        "roi_media": roi("Media"),
+        # Columnas históricas: roi_minima = obra Simple, roi_media = obra Intermedia (base).
+        "roi_minima": roi("Simple"),
+        "roi_media": roi("Intermedia"),
         "roi_integral": roi("Integral"),
         "ganancia_media": base.ganancia_neta if base else None,
         "precio_max_compra": base.precio_max_compra if base else None,
@@ -115,14 +130,23 @@ def construir_fila(
         "motivo_descarte": motivo,
         "entorno": None,
         "puntaje_entorno": None,
+        "ficha": None,
         "estado": estado,
     }
 
 
-def mediana(valores: list[float]) -> float:
-    v = sorted(valores)
-    n = len(v)
-    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+def columna_existe(db: SupabaseREST, tabla: str, columna: str) -> bool:
+    try:
+        db.select(tabla, columnas=columna, limite=1)
+        return True
+    except ErrorSupabase:
+        return False
+
+
+def url_informe(huella: str) -> Optional[str]:
+    if not cfg.TABLERO_URL:
+        return None
+    return urljoin(cfg.TABLERO_URL.rstrip("/") + "/", generador_informes.ruta_informe(huella))
 
 
 # =========================================================================== #
@@ -143,7 +167,6 @@ def procesar_avisos(db: SupabaseREST, resumen: ResumenCorrida, dry_run: bool) ->
 
     if avisos:
         recolector.preparar_comparables({a.barrio for a in avisos})
-    resumen.errores.extend(recolector.stats.errores)
 
     motor = MotorFinanciero()
     filas: list[dict] = []
@@ -153,16 +176,23 @@ def procesar_avisos(db: SupabaseREST, resumen: ResumenCorrida, dry_run: bool) ->
             resumen.sin_comparables += 1
             filas.append(construir_fila(
                 aviso, comps, None,
-                f"Sólo {len(comps)} comparables reciclados en {aviso.barrio} (mínimo {cfg.COMPARABLES_MIN}).",
+                f"Sólo {len(comps)} comparables PH similares en {aviso.barrio} (mínimo {cfg.COMPARABLES_MIN}).",
             ))
             continue
-        usd_m2 = mediana([c.usd_m2 for c in comps])
-        analisis = motor.analizar(aviso.precio_usd, aviso.m2_cubiertos, usd_m2, aviso.expensas_usd)
+        analisis = motor.analizar(aviso.precio_usd, aviso.m2_cubiertos, [c.usd_m2 for c in comps])
         filas.append(construir_fila(aviso, comps, analisis, analisis.motivo))
         if not analisis.aprobada:
             resumen.descartadas_auto += 1
 
     aprobadas = [f for f in filas if f["aprobada"]]
+    if aprobadas:
+        # Ficha completa: se scrapea la URL individual sólo de las aprobadas.
+        fichas = recolector.detallar_aprobadas(aprobadas)
+        for fila in aprobadas:
+            fila["ficha"] = fichas.get(fila["url"])
+    resumen.excluidos_no_ph = recolector.stats.excluidos_no_ph
+    resumen.errores.extend(recolector.stats.errores)
+
     if aprobadas:
         log.info("Analizando entorno de %d oportunidades con Gemini…", len(aprobadas))
         analista = AnalistaEntorno()
@@ -172,12 +202,19 @@ def procesar_avisos(db: SupabaseREST, resumen: ResumenCorrida, dry_run: bool) ->
 
     resumen.aprobadas = sorted(aprobadas, key=lambda f: f["roi_media"] or 0, reverse=True)
 
+    # Informes individuales con los datos completos en memoria (incluye la ficha).
+    generador_informes.generar_informes(aprobadas)
+
     if dry_run:
         salida = cfg.BASE_DIR / "dry_run_resultados.json"
         salida.write_text(json.dumps(filas, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         log.info("Dry-run: %d filas guardadas en %s (no se escribió en Supabase)", len(filas), salida)
         return
 
+    if filas and not columna_existe(db, cfg.TABLA_PROPIEDADES, "ficha"):
+        log.warning("La tabla %s no tiene la columna `ficha` (ver schema.sql): se guarda sin la ficha.", cfg.TABLA_PROPIEDADES)
+        for fila in filas:
+            fila.pop("ficha", None)
     insertadas = db.insert(cfg.TABLA_PROPIEDADES, filas, on_conflict="huella")
     log.info("Supabase: %d propiedades nuevas guardadas", len(insertadas))
 
@@ -187,6 +224,7 @@ def procesar_avisos(db: SupabaseREST, resumen: ResumenCorrida, dry_run: bool) ->
 # =========================================================================== #
 def generar_tablero(propiedades: list[dict], ruta: Path = cfg.TABLERO_HTML) -> Path:
     datos = json.dumps(propiedades, ensure_ascii=False, default=str).replace("</", "<\\/")
+    informes = json.dumps(generador_informes.huellas_con_informe())
     generado = datetime.now(ART).strftime("%d/%m/%Y %H:%M")
     contenido = (
         PLANTILLA_TABLERO
@@ -194,6 +232,7 @@ def generar_tablero(propiedades: list[dict], ruta: Path = cfg.TABLERO_HTML) -> P
         .replace("__SUPABASE_ANON_KEY__", cfg.SUPABASE_ANON_KEY)
         .replace("__TABLA__", cfg.TABLA_PROPIEDADES)
         .replace("__GENERADO__", generado)
+        .replace("__INFORMES__", informes)
         .replace("__DATA__", datos)  # siempre al final
     )
     ruta.write_text(contenido, encoding="utf-8")
@@ -212,63 +251,110 @@ def pct(n: Optional[float]) -> str:
     return "—" if n is None else f"{n * 100:.1f}%".replace(".", ",")
 
 
-def armar_mensaje(resumen: ResumenCorrida, solo_tablero: bool, cantidad_tablero: int) -> str:
+TELEGRAM_POR_MENSAJE = 7         # propiedades por mensaje (tandas de 6 a 8)
+TELEGRAM_LIMITE_CARACTERES = 3800  # Telegram corta en 4096: siempre por debajo
+
+
+def bloque_oportunidad(i: int, f: dict) -> str:
+    """Bloque HTML de una propiedad aprobada para Telegram."""
     e = html.escape
-    lineas = [f"🏠 <b>Agente House Flipping</b> — {resumen.inicio:%d/%m/%Y}"]
+    entorno = f.get("entorno") or {}
+    base = (f.get("escenarios") or {}).get("Intermedia") or {}
+    links = []
+    informe = url_informe(f.get("huella") or "")
+    if informe:
+        links.append(f"<a href=\"{e(informe, quote=True)}\">Ver informe</a>")
+    links.append(f"<a href=\"{e(f['url'], quote=True)}\">Ver aviso</a>")
+    return (
+        f"{i}. <b>PH {e(str(f.get('barrio') or ''))}</b> · {f.get('ambientes') or '?'} amb · "
+        f"{float(f.get('m2_cubiertos') or 0):.0f} m² · {usd(f.get('precio_usd'))}\n"
+        f"   ROI al publicado {pct(f.get('roi_media'))} · Oferta máx. 20 % {usd(base.get('oferta_max_20'))}\n"
+        f"   Entorno {entorno.get('puntaje_entorno') or '?'}/10 · " + " · ".join(links)
+    )
+
+
+def armar_mensajes(resumen: ResumenCorrida, solo_tablero: bool, cantidad_tablero: int) -> list[str]:
+    """
+    Mensaje 1: resumen de la corrida. Mensajes siguientes: TODAS las aprobadas,
+    ordenadas por ROI descendente, en tandas de TELEGRAM_POR_MENSAJE y siempre
+    por debajo de TELEGRAM_LIMITE_CARACTERES.
+    """
+    e = html.escape
+    lineas = [f"🏠 <b>Agente House Flipping PH</b> — {resumen.inicio:%d/%m/%Y}"]
     if solo_tablero:
         lineas.append(f"Tablero actualizado: {cantidad_tablero} oportunidades activas.")
     else:
         lineas += [
-            f"📡 Relevados: {resumen.crudos} · Pasan filtros: {resumen.pasan_filtros} · Nuevos: {resumen.nuevos}",
+            f"📡 PH relevados: {resumen.crudos} · Pasan filtros: {resumen.pasan_filtros} · Nuevos: {resumen.nuevos}",
+            f"🚫 Excluidos (no PH / a estrenar / pozo): {resumen.excluidos_no_ph}",
             f"✅ <b>Oportunidades aprobadas hoy: {len(resumen.aprobadas)}</b>",
             f"❌ Descarte automático: {resumen.descartadas_auto} · ⚪ Sin comparables: {resumen.sin_comparables}",
         ]
-        if resumen.aprobadas:
-            lineas.append("\n<b>🔥 Top oportunidades (ROI Reforma Media)</b>")
-            for i, f in enumerate(resumen.aprobadas[:10], 1):
-                entorno = f.get("entorno") or {}
-                rebaja = f.get("rebaja_requerida_pct") or 0
-                oferta = "a precio de lista" if rebaja <= 0 else f"ofertar ≤ {usd(f.get('precio_max_compra'))} (−{pct(rebaja)})"
-                lineas.append(
-                    f"\n{i}. <b>{e(f['barrio'])}</b> · {f.get('ambientes') or '?'} amb · "
-                    f"{f['m2_cubiertos']:.0f} m² · {usd(f['precio_usd'])}\n"
-                    f"   ROI {pct(f.get('roi_media'))} · Ganancia {usd(f.get('ganancia_media'))} · {oferta}\n"
-                    f"   Entorno {entorno.get('puntaje_entorno') or '?'}/10 · {e(f['portal'])} · "
-                    f"<a href=\"{e(f['url'], quote=True)}\">Ver aviso</a>"
-                )
-        else:
+        if not resumen.aprobadas:
             lineas.append("\nHoy no aparecieron oportunidades que cumplan la regla del 15 %.")
     if resumen.errores:
         lineas.append("\n⚠️ <b>Incidencias:</b>")
         lineas += [f"• {e(err[:180])}" for err in resumen.errores[:6]]
     if cfg.TABLERO_URL:
         lineas.append(f"\n📊 <a href=\"{e(cfg.TABLERO_URL, quote=True)}\">Abrir Tablero</a>")
-    return "\n".join(lineas)
+    mensajes = ["\n".join(lineas)[:TELEGRAM_LIMITE_CARACTERES]]
+
+    if solo_tablero or not resumen.aprobadas:
+        return mensajes
+
+    ordenadas = sorted(resumen.aprobadas, key=lambda f: f.get("roi_media") or 0, reverse=True)
+    bloques = [bloque_oportunidad(i, f) for i, f in enumerate(ordenadas, 1)]
+    total = len(bloques)
+
+    def cabecera(desde: int, hasta: int) -> str:
+        return f"<b>🔥 Oportunidades {desde}–{hasta} de {total}</b> (ROI obra Intermedia)\n"
+
+    tandas: list[tuple[int, list[str]]] = []  # (índice inicial, bloques)
+    actual: list[str] = []
+    inicio = 1
+    for n, bloque in enumerate(bloques, 1):
+        candidato = actual + [bloque]
+        largo = len(cabecera(inicio, n)) + len("\n\n".join(candidato))
+        if actual and (len(actual) >= TELEGRAM_POR_MENSAJE or largo > TELEGRAM_LIMITE_CARACTERES):
+            tandas.append((inicio, actual))
+            actual, inicio = [bloque], n
+        else:
+            actual = candidato
+    if actual:
+        tandas.append((inicio, actual))
+
+    for desde, grupo in tandas:
+        hasta = desde + len(grupo) - 1
+        mensajes.append((cabecera(desde, hasta) + "\n" + "\n\n".join(grupo))[:TELEGRAM_LIMITE_CARACTERES])
+    return mensajes
 
 
-def enviar_telegram(texto: str) -> None:
+def enviar_telegram(mensajes: list[str]) -> None:
     if not (cfg.TELEGRAM_BOT_TOKEN and cfg.TELEGRAM_CHAT_ID):
         log.warning("Telegram no configurado: no se envía el resumen.")
         return
+    if not cfg.TABLERO_URL:
+        log.warning("TABLERO_URL no configurado: los mensajes salen sin el link 'Ver informe'.")
     url = f"https://api.telegram.org/bot{cfg.TELEGRAM_BOT_TOKEN}/sendMessage"
-    # Telegram admite hasta 4096 caracteres: se parte por líneas.
-    bloques, actual = [], ""
-    for linea in texto.split("\n"):
-        if len(actual) + len(linea) + 1 > 3900:
-            bloques.append(actual)
-            actual = ""
-        actual += linea + "\n"
-    if actual.strip():
-        bloques.append(actual)
-    for bloque in bloques:
+    for i, texto in enumerate(mensajes):
+        if i:
+            time.sleep(1.1)  # Telegram limita ~1 mensaje/seg por chat
         r = requests.post(
             url,
-            data={"chat_id": cfg.TELEGRAM_CHAT_ID, "text": bloque, "parse_mode": "HTML", "disable_web_page_preview": True},
+            data={"chat_id": cfg.TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=20,
         )
+        if r.status_code == 429:  # demasiados mensajes: esperar lo que pide Telegram y reintentar
+            espera = (r.json().get("parameters") or {}).get("retry_after", 5)
+            time.sleep(float(espera) + 1)
+            r = requests.post(
+                url,
+                data={"chat_id": cfg.TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML", "disable_web_page_preview": True},
+                timeout=20,
+            )
         if not r.ok:
             raise RuntimeError(f"Telegram respondió {r.status_code}: {r.text[:300]}")
-    log.info("Resumen enviado a Telegram (%d mensaje/s)", len(bloques))
+    log.info("Resumen enviado a Telegram (%d mensaje/s)", len(mensajes))
 
 
 # =========================================================================== #
@@ -312,12 +398,14 @@ def main() -> int:
         orden="creado_en.desc",
         limite=500,
     )
+    # Completa informes que falten (p. ej. corrida --solo-tablero); no pisa los existentes.
+    generador_informes.generar_informes(oportunidades, solo_faltantes=True)
     generar_tablero(oportunidades)
 
     if not (args.sin_telegram or args.dry_run):
         activas = sum(1 for o in oportunidades if o.get("estado") in ("nueva", "me_interesa"))
         try:
-            enviar_telegram(armar_mensaje(resumen, args.solo_tablero, activas))
+            enviar_telegram(armar_mensajes(resumen, args.solo_tablero, activas))
         except Exception:  # noqa: BLE001
             log.exception("No se pudo enviar el resumen a Telegram")
             codigo_salida = 1
@@ -392,6 +480,7 @@ a{color:var(--accent)}
 .btn{flex:1;border:0;border-radius:10px;padding:10px;font-size:14.5px;font-weight:600;cursor:pointer}
 .btn.si{background:var(--ok);color:#fff}.btn.no{background:var(--bad-bg);color:var(--bad)}.btn.neutro{background:var(--chip);color:var(--text)}
 .btn:disabled{opacity:.5;cursor:wait}
+a.btn.informe{display:block;text-align:center;text-decoration:none;flex:none}
 .vacio{grid-column:1/-1;text-align:center;color:var(--muted);padding:48px 0}
 #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:calc(100% - 32px)}
 #toast.show{opacity:1}
@@ -402,7 +491,7 @@ a{color:var(--accent)}
 <header>
   <div class="top">
     <div>
-      <h1>🏠 House Flipping · CABA + GBA Norte</h1>
+      <h1>🏠 House Flipping PH · CABA + GBA Norte</h1>
       <div class="meta"><span id="dot" class="dot"></span><span id="conexion">Conectando…</span> · Generado __GENERADO__</div>
     </div>
     <button class="tab" id="tema" title="Cambiar tema">🌓</button>
@@ -412,7 +501,7 @@ a{color:var(--accent)}
     <button class="tab" data-estado="me_interesa">✅ Me interesa <span id="c-me_interesa"></span></button>
     <button class="tab" data-estado="descartada">❌ Descartadas <span id="c-descartada"></span></button>
     <select id="orden" aria-label="Ordenar">
-      <option value="roi">Mayor ROI (Media)</option>
+      <option value="roi">Mayor ROI (Intermedia)</option>
       <option value="rebaja">Menor rebaja requerida</option>
       <option value="precio">Menor precio</option>
       <option value="entorno">Mejor entorno</option>
@@ -426,6 +515,7 @@ a{color:var(--accent)}
 
 <script>
 const CONFIG = { url: "__SUPABASE_URL__", key: "__SUPABASE_ANON_KEY__", tabla: "__TABLA__" };
+const INFORMES = new Set(__INFORMES__);
 const SNAPSHOT = __DATA__;
 let props = SNAPSHOT;
 let filtroEstado = "nueva";
@@ -499,21 +589,32 @@ function ordenar(lista) {
   return lista.sort(f);
 }
 
-function tablaEscenarios(p) {
-  const orden = ["Mínima", "Media", "Integral"];
-  const esc_ = p.escenarios || {};
-  const filas = orden.filter(k => esc_[k]).map(k => {
-    const e = esc_[k];
-    return `<tr class="${k === "Media" ? "base" : ""}">
-      <td>${k}${k === "Media" ? " ★" : ""}</td>
+// "Mínima"/"Media" son los nombres de las filas guardadas antes del cambio a Simple/Intermedia.
+const BASES = ["Intermedia", "Media"];
+function filaEscenario(etiqueta, e, esBase) {
+  return `<tr class="${esBase ? "base" : ""}">
+      <td>${etiqueta}${esBase ? " ★" : ""}</td>
       <td>${fmtUSD(e.costo_reforma)}</td>
       <td>${fmtUSD(e.inversion_total)}</td>
       <td>${fmtUSD(e.precio_venta)}</td>
       <td class="${e.ganancia_neta >= 0 ? "pos" : "neg"}">${fmtUSD(e.ganancia_neta)}</td>
       <td class="${e.roi >= 0.15 ? "pos" : e.roi < 0 ? "neg" : ""}">${fmtPct(e.roi)}</td>
     </tr>`;
-  }).join("");
-  return `<table><thead><tr><th>Reforma</th><th>Obra</th><th>Inversión</th><th>Venta</th><th>Ganancia</th><th>ROI</th></tr></thead><tbody>${filas}</tbody></table>`;
+}
+function tablaEscenarios(p) {
+  const orden = ["Simple", "Mínima", "Intermedia", "Media", "Integral"];
+  const esc_ = p.escenarios || {};
+  const filas = orden.filter(k => esc_[k]).map(k => filaEscenario(k, esc_[k], BASES.includes(k))).join("");
+  const cab = `<thead><tr><th>__COL__</th><th>Obra</th><th>Inversión</th><th>Venta</th><th>Ganancia</th><th>ROI</th></tr></thead>`;
+  let html_ = `<table>${cab.replace("__COL__", "Obra")}<tbody>${filas}</tbody></table>`;
+  const rv = esc_.Reventa;
+  if (rv) {
+    const f2 = ["Pesimista", "Base", "Optimista"].filter(k => rv[k])
+      .map(k => filaEscenario(`${k} <span class="meta">${fmtUSD(rv[k].usd_m2)}/m²</span>`, rv[k], k === "Base")).join("");
+    html_ += `<div class="meta">Valor de reventa con obra Intermedia (p25 / mediana / p75 × m² × 0,95)</div>
+      <table>${cab.replace("__COL__", "Reventa")}<tbody>${f2}</tbody></table>`;
+  }
+  return html_;
 }
 
 function bloqueEntorno(p) {
@@ -542,8 +643,8 @@ function bloqueComparables(p) {
   const c = p.comparables || [];
   if (!c.length) return "";
   return `<details>
-    <summary>🏷️ ${c.length} comparables reciclados · mediana ${fmtUSD(p.usd_m2_comparables)}/m²</summary>
-    <ul>${c.map(x => `<li><a href="${urlSegura(x.url)}" target="_blank" rel="noopener">${esc(x.portal)}</a> · ${fmtUSD(x.precio_usd)} · ${Math.round(x.m2_cubiertos)} m² · ${fmtUSD(x.usd_m2)}/m²</li>`).join("")}</ul>
+    <summary>🏷️ ${c.length} comparables PH · mediana ${fmtUSD(p.usd_m2_comparables)}/m²</summary>
+    <ul>${c.map(x => `<li><a href="${urlSegura(x.url)}" target="_blank" rel="noopener">${esc(x.portal)}</a> · ${fmtUSD(x.precio_usd)} · ${x.ambientes ?? "?"} amb · ${Math.round(x.m2_cubiertos)} m² · ${fmtUSD(x.usd_m2)}/m²${x.estado ? ` · <span class="chip">${esc(x.estado)}</span>` : ""}</li>`).join("")}</ul>
   </details>`;
 }
 
@@ -577,9 +678,10 @@ function tarjeta(p) {
         <span class="chip">${fmtUSD(usdM2)}/m²</span>
         ${descuentoVsComps != null ? `<span class="chip ${descuentoVsComps > 0.3 ? "ok" : ""}">${fmtPct(descuentoVsComps)} bajo reciclados</span>` : ""}
         ${p.expensas_usd ? `<span class="chip">Exp. ${fmtUSD(p.expensas_usd)}</span>` : ""}
-        <span class="chip ${(p.roi_media ?? 0) >= 0.15 ? "ok" : "warn"}">ROI Media ${fmtPct(p.roi_media)}</span>
+        <span class="chip ${(p.roi_media ?? 0) >= 0.15 ? "ok" : "warn"}">ROI Intermedia ${fmtPct(p.roi_media)}</span>
       </div>
       ${oferta}
+      ${INFORMES.has(p.huella) ? `<a class="btn neutro informe" href="informes/${encodeURIComponent(p.huella)}.html" target="_blank" rel="noopener">📄 Ver informe completo</a>` : ""}
       ${tablaEscenarios(p)}
       ${bloqueEntorno(p)}
       ${bloqueComparables(p)}

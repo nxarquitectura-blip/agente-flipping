@@ -1,30 +1,44 @@
 """
-motor_financiero.py — Motor matemático de House Flipping (CABA / GBA Norte).
+motor_financiero.py — Motor matemático de House Flipping de PH usados (CABA / GBA Norte).
 
-Para cada propiedad evalúa 3 escenarios de reforma:
-    • Mínima   USD 200/m²
-    • Media    USD 400/m²   ← ESCENARIO BASE
-    • Integral USD 600/m²
+Valor de reventa (a partir de los comparables PH del mismo barrio):
+    • Pesimista  percentil 25 USD/m² × m² cubiertos × 0,95
+    • Base       mediana      USD/m² × m² cubiertos × 0,95
+    • Optimista  percentil 75 USD/m² × m² cubiertos × 0,95
+    (0,95 = −5 % de ajuste de cierre sobre el precio de publicación)
 
-Incluye gastos de compra, tenencia (obra + comercialización) y venta.
+Niveles de obra (USD por m² cubierto):
+    • Simple      USD 200/m²
+    • Intermedia  USD 400/m²   ← ESCENARIO BASE DEL INFORME
+    • Integral    USD 600/m²
+
+Fórmulas:
+    gastos de compra = precio de compra × 8,39 %   (escritura, sellos, honorarios)
+    costo de obra    = m² cubiertos × USD/m² del nivel de obra
+    tenencia         = USD 3.000 fijos (≈ 3 meses de obra)
+    inversión total  = compra + gastos de compra + obra + tenencia
+    venta neta       = valor de venta (ya con −5 %) × (1 − 5,28 %)
+    ganancia bruta   = venta neta − inversión total
+    ganancia neta    = ganancia bruta × 0,85 si es positiva (15 % de impuesto); si no, = bruta
+    ROI              = ganancia neta / inversión total
+
+Precio máximo de compra para un ROI neto objetivo r (> 0):
+    0,85 × (VN − I) = r × I   →   I = VN / (1 + r / 0,85)
+    P_max = (I − obra − tenencia) / (1 + 8,39 %)
+    • oferta_max_20  → r = 20 %
+    • techo_15       → r = 15 %
+    • break_even     → ganancia = 0  →  I = VN
+    • limite_negociacion = precio publicado × 0,85 (−15 %)
 
 Regla de descarte automático:
-    Si en el escenario Media hace falta negociar una rebaja MAYOR al 15 % sobre
-    el precio publicado para alcanzar un ROI del 15 %, la propiedad se descarta.
-
-Definiciones:
-    inversión total = precio compra + gastos compra + reforma + tenencia
-    ingreso neto    = precio de venta − gastos de venta
-    ganancia neta   = ingreso neto − inversión total
-    ROI             = ganancia neta / inversión total
-    precio máximo de compra (ROI objetivo):
-        P_max = (ingreso_neto / (1 + ROI_obj) − reforma − tenencia) / (1 + %gastos_compra)
-    rebaja requerida = (precio publicado − P_max) / precio publicado
+    Si en el escenario Intermedia (valor Base) el techo_15 exige una rebaja MAYOR
+    al 15 % sobre el precio publicado, la propiedad se descarta.
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 
 # --------------------------------------------------------------------------- #
@@ -32,54 +46,44 @@ from typing import Optional
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class ParametrosMercado:
-    # Compra (porcentajes sobre el precio de compra)
-    comision_compra_pct: float = 0.04       # honorarios inmobiliaria comprador (tope CABA 4 %)
-    escribania_compra_pct: float = 0.02     # escribano + certificados + IVA
-    sellos_compra_pct: float = 0.0175       # 50 % del Impuesto de Sellos (3,5 %)
-    otros_compra_pct: float = 0.005         # gestoría, transferencias, varios
+    gastos_compra_pct: float = 0.0839       # escritura + sellos + honorarios
+    gastos_venta_pct: float = 0.0528        # se descuenta del valor de venta estimado
+    tenencia_obra_usd: float = 3_000.0      # estimado 3 meses
+    meses_tenencia: int = 3                 # sólo para el ROI anualizado
+    meses_comercializacion: int = 3         # sólo para el ROI anualizado
+    ajuste_cierre: float = 0.95             # −5 % de cierre sobre publicación
+    impuesto_ganancia_pct: float = 0.15     # sobre la ganancia bruta positiva
 
-    # Venta (porcentajes sobre el precio de venta)
-    comision_venta_pct: float = 0.03        # honorarios inmobiliaria vendedor
-    sellos_venta_pct: float = 0.0175        # 50 % del Impuesto de Sellos
-    impuesto_venta_pct: float = 0.015       # ITI 1,5 %
-    otros_venta_pct: float = 0.005          # certificados, planos, fotos, home staging
-
-    # Tenencia (USD por mes)
-    expensas_default_usd: float = 90.0      # si el aviso no informa expensas
-    abl_servicios_mensual_usd: float = 45.0 # ABL/ARBA + luz/gas/agua mínimos
-    meses_comercializacion: int = 4
-
-    # Obra
-    imprevistos_pct: float = 0.10           # colchón sobre el costo de reforma
-
-    # Reglas de negocio
-    roi_objetivo: float = 0.15
-    rebaja_maxima_admitida: float = 0.15
-
-    @property
-    def gastos_compra_pct(self) -> float:
-        return self.comision_compra_pct + self.escribania_compra_pct + self.sellos_compra_pct + self.otros_compra_pct
-
-    @property
-    def gastos_venta_pct(self) -> float:
-        return self.comision_venta_pct + self.sellos_venta_pct + self.impuesto_venta_pct + self.otros_venta_pct
+    # Reglas de negocio (ROI netos de impuesto)
+    roi_oferta: float = 0.20                # oferta_max_20
+    roi_objetivo: float = 0.15              # techo_15
+    rebaja_maxima_admitida: float = 0.15    # también define limite_negociacion
 
 
 @dataclass(frozen=True)
 class EscenarioReforma:
     nombre: str
     costo_m2_usd: float
-    meses_obra: int
-    # Qué fracción del valor "reciclado a nuevo" (comparables) se alcanza al vender.
-    factor_valor_venta: float
 
 
 ESCENARIOS: tuple[EscenarioReforma, ...] = (
-    EscenarioReforma("Mínima", 200, 2, 0.90),
-    EscenarioReforma("Media", 400, 4, 0.97),
-    EscenarioReforma("Integral", 600, 6, 1.00),
+    EscenarioReforma("Simple", 200),
+    EscenarioReforma("Intermedia", 400),
+    EscenarioReforma("Integral", 600),
 )
-ESCENARIO_BASE = "Media"
+ESCENARIO_BASE = "Intermedia"
+VALORES_REVENTA = ("Pesimista", "Base", "Optimista")
+
+
+def cuartiles(valores: Sequence[float]) -> tuple[float, float, float]:
+    """(percentil 25, mediana, percentil 75) con interpolación inclusiva."""
+    v = sorted(float(x) for x in valores)
+    if not v:
+        raise ValueError("Se necesita al menos un valor")
+    if len(v) == 1:
+        return v[0], v[0], v[0]
+    q1, q2, q3 = statistics.quantiles(v, n=4, method="inclusive")
+    return q1, q2, q3
 
 
 # --------------------------------------------------------------------------- #
@@ -88,18 +92,34 @@ ESCENARIO_BASE = "Media"
 @dataclass
 class ResultadoEscenario:
     nombre: str
+    valor_reventa: str          # Pesimista / Base / Optimista
     costo_m2_usd: float
     costo_reforma: float
     gastos_compra: float
     gastos_tenencia: float
     gastos_venta: float
     inversion_total: float
-    precio_venta: float
-    ingreso_neto: float
-    ganancia_neta: float
-    roi: float
+    precio_venta: float         # valor de venta estimado (ya con −5 % de cierre)
+    ingreso_neto: float         # venta neta de gastos
+    ganancia_bruta: float
+    impuesto_ganancia: float
+    ganancia_neta: float        # después del 15 % de impuesto
+    roi: float                  # ROI neto al precio publicado
     meses_totales: int
     roi_anualizado: float
+    # Precios de compra (con su % de baja vs publicado: 0,10 = 10 % por debajo; negativo = por encima)
+    oferta_max_20: float
+    baja_20_pct: float
+    techo_15: float
+    baja_15_pct: float
+    break_even: float
+    limite_negociacion: float
+    # Rango de ROI neto con venta Pesimista / Optimista
+    roi_publicado_pesimista: float
+    roi_publicado_optimista: float
+    roi_oferta20_pesimista: float
+    roi_oferta20_optimista: float
+    # Compatibilidad con columnas de Supabase / tablero: = techo_15 y su rebaja (≥ 0)
     precio_max_compra: float
     rebaja_requerida_pct: float
 
@@ -108,9 +128,12 @@ class ResultadoEscenario:
 class ResultadoAnalisis:
     precio_publicado: float
     m2_cubiertos: float
-    usd_m2_reciclado: float
-    valor_reciclado_100: float
-    escenarios: dict[str, ResultadoEscenario]
+    usd_m2_reciclado: float                 # mediana USD/m² de los comparables
+    valor_reciclado_100: float              # valor de venta Base (mediana × m² × 0,95)
+    valores_reventa: dict[str, float]       # Pesimista / Base / Optimista
+    usd_m2_reventa: dict[str, float]        # p25 / mediana / p75
+    escenarios: dict[str, ResultadoEscenario]          # niveles de obra, con valor Base
+    sensibilidad: dict[str, ResultadoEscenario]        # obra Intermedia × 3 valores de reventa
     escenario_base: str
     aprobada: bool
     motivo: str
@@ -122,6 +145,7 @@ class ResultadoAnalisis:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["escenarios"] = {k: asdict(v) for k, v in self.escenarios.items()}
+        d["sensibilidad"] = {k: asdict(v) for k, v in self.sensibilidad.items()}
         return d
 
 
@@ -142,53 +166,97 @@ class MotorFinanciero:
         self.escenario_base = escenario_base
 
     # ------------------------------------------------------------------ #
+    def cuentas(self, precio: float, m2: float, valor_venta: float, costo_m2_obra: float) -> dict:
+        """Cuentas completas a un precio de compra dado (lo usa también el informe web)."""
+        p = self.p
+        gastos_compra = precio * p.gastos_compra_pct
+        obra = m2 * costo_m2_obra
+        tenencia = p.tenencia_obra_usd
+        inversion = precio + gastos_compra + obra + tenencia
+        gastos_venta = valor_venta * p.gastos_venta_pct
+        venta_neta = valor_venta - gastos_venta
+        bruta = venta_neta - inversion
+        impuesto = bruta * p.impuesto_ganancia_pct if bruta > 0 else 0.0
+        neta = bruta - impuesto
+        return {
+            "compra": precio,
+            "gastos_compra": gastos_compra,
+            "obra": obra,
+            "tenencia": tenencia,
+            "inversion_total": inversion,
+            "valor_venta": valor_venta,
+            "gastos_venta": gastos_venta,
+            "venta_neta": venta_neta,
+            "ganancia_bruta": bruta,
+            "impuesto": impuesto,
+            "ganancia_neta": neta,
+            "roi": neta / inversion if inversion > 0 else 0.0,
+        }
+
+    def precio_para_roi(self, valor_venta: float, m2: float, costo_m2_obra: float, roi_neto: float) -> float:
+        """Precio de compra máximo para lograr `roi_neto` (0 = break-even)."""
+        p = self.p
+        venta_neta = valor_venta * (1 - p.gastos_venta_pct)
+        if roi_neto > 0:
+            inversion = venta_neta / (1 + roi_neto / (1 - p.impuesto_ganancia_pct))
+        else:
+            inversion = venta_neta
+        precio = (inversion - m2 * costo_m2_obra - p.tenencia_obra_usd) / (1 + p.gastos_compra_pct)
+        return max(precio, 0.0)
+
     def evaluar_escenario(
         self,
         precio: float,
         m2: float,
-        valor_reciclado_100: float,
-        expensas_usd: Optional[float],
+        valores: dict[str, float],
         esc: EscenarioReforma,
+        nombre_valor: str = "Base",
     ) -> ResultadoEscenario:
+        """`valores` = valor de venta Pesimista / Base / Optimista (ya con −5 % de cierre)."""
         p = self.p
-        expensas = expensas_usd if expensas_usd and expensas_usd > 0 else p.expensas_default_usd
+        valor_venta = valores[nombre_valor]
+        c = self.cuentas(precio, m2, valor_venta, esc.costo_m2_usd)
 
-        precio_venta = valor_reciclado_100 * esc.factor_valor_venta
-        costo_reforma = m2 * esc.costo_m2_usd * (1 + p.imprevistos_pct)
-        meses = esc.meses_obra + p.meses_comercializacion
-        gastos_tenencia = meses * (expensas + p.abl_servicios_mensual_usd)
-        gastos_compra = precio * p.gastos_compra_pct
-        gastos_venta = precio_venta * p.gastos_venta_pct
-
-        inversion = precio + gastos_compra + costo_reforma + gastos_tenencia
-        ingreso_neto = precio_venta - gastos_venta
-        ganancia = ingreso_neto - inversion
-        roi = ganancia / inversion if inversion > 0 else 0.0
+        meses = p.meses_tenencia + p.meses_comercializacion
+        roi = c["roi"]
         roi_anual = (1 + roi) ** (12 / meses) - 1 if roi > -1 and meses > 0 else -1.0
 
-        precio_max = (ingreso_neto / (1 + p.roi_objetivo) - costo_reforma - gastos_tenencia) / (1 + p.gastos_compra_pct)
-        precio_max = max(precio_max, 0.0)
-        if precio_max <= 0:
-            rebaja = 1.0
-        else:
-            rebaja = max(0.0, (precio - precio_max) / precio)
+        oferta20 = self.precio_para_roi(valor_venta, m2, esc.costo_m2_usd, p.roi_oferta)
+        techo15 = self.precio_para_roi(valor_venta, m2, esc.costo_m2_usd, p.roi_objetivo)
+        break_even = self.precio_para_roi(valor_venta, m2, esc.costo_m2_usd, 0.0)
+        baja = lambda tope: 1 - tope / precio  # noqa: E731
+        roi_a = lambda compra, k: self.cuentas(compra, m2, valores[k], esc.costo_m2_usd)["roi"]  # noqa: E731
+        rebaja15 = 1.0 if techo15 <= 0 else max(0.0, baja(techo15))
 
         return ResultadoEscenario(
             nombre=esc.nombre,
+            valor_reventa=nombre_valor,
             costo_m2_usd=esc.costo_m2_usd,
-            costo_reforma=round(costo_reforma, 2),
-            gastos_compra=round(gastos_compra, 2),
-            gastos_tenencia=round(gastos_tenencia, 2),
-            gastos_venta=round(gastos_venta, 2),
-            inversion_total=round(inversion, 2),
-            precio_venta=round(precio_venta, 2),
-            ingreso_neto=round(ingreso_neto, 2),
-            ganancia_neta=round(ganancia, 2),
+            costo_reforma=round(c["obra"], 2),
+            gastos_compra=round(c["gastos_compra"], 2),
+            gastos_tenencia=round(c["tenencia"], 2),
+            gastos_venta=round(c["gastos_venta"], 2),
+            inversion_total=round(c["inversion_total"], 2),
+            precio_venta=round(valor_venta, 2),
+            ingreso_neto=round(c["venta_neta"], 2),
+            ganancia_bruta=round(c["ganancia_bruta"], 2),
+            impuesto_ganancia=round(c["impuesto"], 2),
+            ganancia_neta=round(c["ganancia_neta"], 2),
             roi=round(roi, 4),
             meses_totales=meses,
             roi_anualizado=round(roi_anual, 4),
-            precio_max_compra=round(precio_max, 2),
-            rebaja_requerida_pct=round(rebaja, 4),
+            oferta_max_20=round(oferta20, 2),
+            baja_20_pct=round(baja(oferta20), 4),
+            techo_15=round(techo15, 2),
+            baja_15_pct=round(baja(techo15), 4),
+            break_even=round(break_even, 2),
+            limite_negociacion=round(precio * (1 - p.rebaja_maxima_admitida), 2),
+            roi_publicado_pesimista=round(roi_a(precio, "Pesimista"), 4),
+            roi_publicado_optimista=round(roi_a(precio, "Optimista"), 4),
+            roi_oferta20_pesimista=round(roi_a(oferta20, "Pesimista"), 4) if oferta20 > 0 else 0.0,
+            roi_oferta20_optimista=round(roi_a(oferta20, "Optimista"), 4) if oferta20 > 0 else 0.0,
+            precio_max_compra=round(techo15, 2),
+            rebaja_requerida_pct=round(rebaja15, 4),
         )
 
     # ------------------------------------------------------------------ #
@@ -196,49 +264,60 @@ class MotorFinanciero:
         self,
         precio_usd: float,
         m2_cubiertos: float,
-        usd_m2_reciclado: float,
-        expensas_usd: Optional[float] = None,
+        usd_m2_comparables: Sequence[float],
     ) -> ResultadoAnalisis:
         """
-        precio_usd        precio publicado
-        m2_cubiertos      superficie cubierta
-        usd_m2_reciclado  mediana USD/m² de comparables reciclados a nuevo
-        expensas_usd      expensas mensuales en USD (opcional)
+        precio_usd          precio publicado
+        m2_cubiertos        superficie cubierta del aviso
+        usd_m2_comparables  USD/m² de los comparables PH seleccionados del mismo barrio
         """
-        if precio_usd <= 0 or m2_cubiertos <= 0 or usd_m2_reciclado <= 0:
-            raise ValueError("precio, m² y USD/m² de comparables deben ser positivos")
+        if precio_usd <= 0 or m2_cubiertos <= 0 or not usd_m2_comparables:
+            raise ValueError("precio, m² y comparables deben ser positivos / no vacíos")
+        p25, p50, p75 = cuartiles(usd_m2_comparables)
+        if p25 <= 0:
+            raise ValueError("USD/m² de comparables deben ser positivos")
 
-        valor_100 = usd_m2_reciclado * m2_cubiertos
+        usd_m2 = dict(zip(VALORES_REVENTA, (p25, p50, p75)))
+        valores = {k: v * m2_cubiertos * self.p.ajuste_cierre for k, v in usd_m2.items()}
+
         resultados = {
-            e.nombre: self.evaluar_escenario(precio_usd, m2_cubiertos, valor_100, expensas_usd, e)
+            e.nombre: self.evaluar_escenario(precio_usd, m2_cubiertos, valores, e, "Base")
             for e in self.escenarios
         }
+        esc_base = next(e for e in self.escenarios if e.nombre == self.escenario_base)
+        sensibilidad = {
+            k: self.evaluar_escenario(precio_usd, m2_cubiertos, valores, esc_base, k)
+            for k in VALORES_REVENTA
+        }
+
         base = resultados[self.escenario_base]
         limite = self.p.rebaja_maxima_admitida
-
         if base.rebaja_requerida_pct > limite:
             aprobada = False
             motivo = (
-                f"Descarte automático: en Reforma {self.escenario_base} requiere "
-                f"{base.rebaja_requerida_pct:.1%} de rebaja (máx. {limite:.0%}) para un ROI del "
-                f"{self.p.roi_objetivo:.0%}. Precio máx. de compra USD {base.precio_max_compra:,.0f}."
+                f"Descarte automático: en obra {self.escenario_base} el techo para ROI neto "
+                f"{self.p.roi_objetivo:.0%} es USD {base.techo_15:,.0f}, "
+                f"{base.rebaja_requerida_pct:.1%} bajo el publicado (máx. {limite:.0%})."
             )
         elif base.rebaja_requerida_pct > 0:
             aprobada = True
             motivo = (
-                f"Aprobada negociando {base.rebaja_requerida_pct:.1%}: ofertar hasta "
-                f"USD {base.precio_max_compra:,.0f} para ROI {self.p.roi_objetivo:.0%}."
+                f"Aprobada negociando: oferta máx. 20 % USD {base.oferta_max_20:,.0f} · "
+                f"techo 15 % USD {base.techo_15:,.0f} ({base.rebaja_requerida_pct:.1%} bajo el publicado)."
             )
         else:
             aprobada = True
-            motivo = f"Aprobada a precio de lista: ROI {self.escenario_base} {base.roi:.1%}."
+            motivo = f"Aprobada a precio de lista: ROI neto {self.escenario_base} {base.roi:.1%}."
 
         return ResultadoAnalisis(
             precio_publicado=precio_usd,
             m2_cubiertos=m2_cubiertos,
-            usd_m2_reciclado=round(usd_m2_reciclado, 2),
-            valor_reciclado_100=round(valor_100, 2),
+            usd_m2_reciclado=round(p50, 2),
+            valor_reciclado_100=round(valores["Base"], 2),
+            valores_reventa={k: round(v, 2) for k, v in valores.items()},
+            usd_m2_reventa={k: round(v, 2) for k, v in usd_m2.items()},
             escenarios=resultados,
+            sensibilidad=sensibilidad,
             escenario_base=self.escenario_base,
             aprobada=aprobada,
             motivo=motivo,
@@ -250,12 +329,13 @@ class MotorFinanciero:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     motor = MotorFinanciero()
-    r = motor.analizar(precio_usd=120_000, m2_cubiertos=70, usd_m2_reciclado=2_600, expensas_usd=100)
-    print(f"Valor reciclado a nuevo: USD {r.valor_reciclado_100:,.0f}")
-    for e in r.escenarios.values():
+    r = motor.analizar(precio_usd=120_000, m2_cubiertos=70, usd_m2_comparables=[2_300, 2_450, 2_600, 2_700, 2_900])
+    print("Valores de reventa: " + " · ".join(f"{k} USD {v:,.0f}" for k, v in r.valores_reventa.items()))
+    for e in [*r.escenarios.values(), *r.sensibilidad.values()]:
         print(
-            f"{e.nombre:<9} reforma USD {e.costo_reforma:>9,.0f} | inversión USD {e.inversion_total:>9,.0f} | "
-            f"venta USD {e.precio_venta:>9,.0f} | ganancia USD {e.ganancia_neta:>9,.0f} | ROI {e.roi:6.1%} | "
-            f"precio máx USD {e.precio_max_compra:>9,.0f} | rebaja req. {e.rebaja_requerida_pct:5.1%}"
+            f"{e.nombre:<10} {e.valor_reventa:<9} obra {e.costo_reforma:>7,.0f} | inv. {e.inversion_total:>8,.0f} | "
+            f"neta {e.ganancia_neta:>8,.0f} | ROI {e.roi:6.1%} [{e.roi_publicado_pesimista:6.1%} a {e.roi_publicado_optimista:6.1%}] | "
+            f"oferta20 {e.oferta_max_20:>8,.0f} ({e.baja_20_pct:5.1%}) | techo15 {e.techo_15:>8,.0f} ({e.baja_15_pct:5.1%}) | "
+            f"BE {e.break_even:>8,.0f} | −15% {e.limite_negociacion:>8,.0f}"
         )
     print(("✅ " if r.aprobada else "❌ ") + r.motivo)
